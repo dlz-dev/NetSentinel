@@ -1,6 +1,20 @@
+# Data
 data/
-__pycache__/
-.ipynb_checkpoints/
-*.pyc
+**/data/output
+
+# Python
+**/__pycache__/
+**/*.pyc
 .venv/
+
+# Spark
+**/spark-logs/
+
+# Jupyter
+**/.ipynb_checkpoints/
+
+# IDE
 .idea/
+
+# OS
+**/.DS_Store
