@@ -3,14 +3,13 @@ import dash
 from dash import dcc, html
 import plotly.express as px
 
-# chargement des données
-feature_importance = pd.read_parquet("data/dashboard/feature_importance.parquet")
-label_counts = pd.read_parquet("data/dashboard/label_counts.parquet")
+# Delta = des fichiers parquet dans un dossier, on lit le dossier
+feature_importance = pd.read_parquet("data/dashboard/feature_importance")
+label_counts = pd.read_parquet("data/dashboard/label_counts")
 
 app = dash.Dash(__name__)
 
 app.layout = html.Div([
-
     html.H1("NetSentinel — SOC Dashboard"),
 
     html.H2("Top 20 features les plus importantes"),
@@ -29,7 +28,6 @@ app.layout = html.Div([
         y="count",
         labels={"label": "Type d'attaque", "count": "Nombre de connexions"}
     )),
-
 ])
 
 if __name__ == "__main__":
