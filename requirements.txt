@@ -7,3 +7,5 @@ seaborn
 scikit-learn
 numpy
 notebook
+dash
+plotly

@@ -46,6 +46,9 @@ services:
       - spark-master
     env_file:
       - .env.spark
+    environment:
+      - SPARK_WORKER_MEMORY=25g
+      - SPARK_EXECUTOR_MEMORY=20g
     volumes:
       - ./scripts:/opt/spark/scripts
       - ./data:/opt/spark/data
