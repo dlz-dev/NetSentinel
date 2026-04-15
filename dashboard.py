@@ -100,12 +100,12 @@ def fig_volume(sel=None):
     return fig
 
 
-def fig_f1(sel=None):
-    """Q2 : Détecte-t-on bien chaque type de menace ? — per_class F1"""
-    df = per_class.sort_values("f1", ascending=True).copy()
-    # Dégradé chaud : mauvais F1 = rouge foncé, bon F1 = ambre/or
+def fig_f1(sel=None, metric="f1"):
+    """Q2 : Détecte-t-on bien chaque type de menace ? — F1 / Precision / Recall"""
+    df = per_class.sort_values(metric, ascending=True).copy()
+    vals = df[metric]
     colors = [CL if v >= 99 else CML if v >= 97 else CM if v >= 95 else CMH if v >= 93 else CH
-              for v in df["f1"]]
+              for v in vals]
     opacity = [1.0 if (not sel or sel == "ALL" or l == sel) else 0.12
                for l in df["label"]]
     fig = go.Figure()
@@ -115,9 +115,9 @@ def fig_f1(sel=None):
         marker=dict(color="rgba(255,255,255,0.04)", line=dict(width=0)),
         showlegend=False, hoverinfo="skip",
     ))
-    # Barres F1
+    # Barres métrique sélectionnée
     fig.add_trace(go.Bar(
-        x=df["f1"], y=df.label, orientation="h", name="F1",
+        x=vals, y=df.label, orientation="h",
         showlegend=False,
         marker=dict(color=colors, opacity=opacity, line=dict(width=0)),
         customdata=df[["label","f1","precision","recall","fn"]].values,
@@ -137,7 +137,7 @@ def fig_f1(sel=None):
         **GL, margin=dict(l=10, r=10, t=10, b=30), height=340,
         barmode="overlay", bargap=0.3,
         xaxis=dict(showgrid=False, tickfont=dict(size=9),
-                   range=[max(0, df["f1"].min() - 3), 100.3], ticksuffix="%"),
+                   range=[max(0, vals.min() - 3), 100.3], ticksuffix="%"),
         yaxis=dict(showgrid=False, tickfont=dict(size=10, color=TX)),
     )
     return fig
@@ -393,7 +393,7 @@ def card(title, question, *children):
 
 # ── Figures initiales ────────────────────────────────────────────────
 FIG_VOL  = fig_volume()
-FIG_F1   = fig_f1()
+FIG_F1   = fig_f1(metric="f1")
 FIG_CONF = fig_confusion()
 FIG_FEAT = fig_features()
 
@@ -451,6 +451,19 @@ app.layout = html.Div([
         html.Span(id="sel-badge",
                   style={"fontSize":"10px","color":A,
                          "fontFamily":"JetBrains Mono,monospace"}),
+        # sélecteur de métrique pour le graph F1
+        html.Span("Métrique", className="filter-label", style={"marginLeft":"24px"}),
+        dcc.RadioItems(
+            id="metric-sel",
+            options=[
+                {"label": "F1",        "value": "f1"},
+                {"label": "Precision", "value": "precision"},
+                {"label": "Recall",    "value": "recall"},
+            ],
+            value="f1", inline=True,
+            style={"fontSize":"11px","color":TX,"gap":"14px","display":"flex"},
+            inputStyle={"marginRight":"4px"},
+        ),
     ], className="filter-bar"),
 
     # GRAPHIQUES — 2 × 2
@@ -458,7 +471,7 @@ app.layout = html.Div([
         card("Volume par type d'attaque", "Qu'est-ce qui attaque ?",
              dcc.Graph(id="g-vol",  figure=FIG_VOL,
                        config={"displayModeBar": False})),
-        card("F1-Score par classe", "Détecte-t-on bien chaque menace ?",
+        card("F1 / Precision / Recall par classe", "Détecte-t-on bien chaque menace ?",
              dcc.Graph(id="g-f1",   figure=FIG_F1,
                        config={"displayModeBar": False})),
     ], className="grid-2"),
@@ -501,10 +514,11 @@ def clock(_):
     Output("sel-badge","children"),
     Output("tbl",      "children"),
     Input("sel",       "value"),
+    Input("metric-sel","value"),
 )
-def apply_filter(sel):
+def apply_filter(sel, metric):
     badge = f"● {sel}" if sel and sel != "ALL" else ""
-    return fig_volume(sel), fig_f1(sel), badge, make_table(sel)
+    return fig_volume(sel), fig_f1(sel, metric=metric), badge, make_table(sel)
 
 
 
