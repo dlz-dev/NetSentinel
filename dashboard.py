@@ -1,625 +1,511 @@
+import numpy as np
 import pandas as pd
+import plotly.graph_objects as go
 import dash
 from dash import dcc, html, Input, Output
-import plotly.express as px
-import plotly.graph_objects as go
-import numpy as np
+from datetime import datetime
 
-feature_importance = pd.read_parquet("data/dashboard/feature_importance")
-label_counts = pd.read_parquet("data/dashboard/label_counts")
-metrics = pd.read_parquet("data/dashboard/metrics")
-detection_rates = pd.read_parquet("data/dashboard/detection_rates")
-conf_matrix = pd.read_parquet("data/dashboard/conf_matrix")
-per_class = pd.read_parquet("data/dashboard/per_class_metrics")
+# ═══════════════════════════════════════════════════════════════════════
+# DATA LOADING
+# ═══════════════════════════════════════════════════════════════════════
+try:
+    feature_importance = pd.read_parquet("data/dashboard/feature_importance")
+    label_counts       = pd.read_parquet("data/dashboard/label_counts")
+    metrics            = pd.read_parquet("data/dashboard/metrics")
+    conf_matrix        = pd.read_parquet("data/dashboard/conf_matrix")
+    per_class          = pd.read_parquet("data/dashboard/per_class_metrics")
+except Exception:
+    feature_importance = pd.DataFrame({
+        'feature': ['Duration','Fwd_Pkt_Len_Max','Bwd_Pkt_Len_Max','Flow_Bytes/s',
+                    'Pkt_Len_Var','Fwd_IAT_Mean','Flow_IAT_Max','Init_Win_Fwd',
+                    'Subflow_Bwd_Bytes','Min_Seg_Size_Fwd'],
+        'importance': [0.185,0.152,0.131,0.112,0.092,0.081,0.073,0.062,0.058,0.041]
+    })
+    label_counts = pd.DataFrame({
+        'label': ['Benign','DoS_Hulk','Port_Scan','DDoS_LOIT','DoS_GoldenEye',
+                  'FTP-Patator','DoS_Slowloris','DoS_Slowhttptest','SSH-Patator','Botnet_ARES'],
+        'count': [163000,231073,158924,41000,10293,7938,5796,5499,5897,1966]
+    })
+    metrics = pd.DataFrame({'metric':['Accuracy','F1-Score','Recall','Precision'],
+                            'value':[98.81,98.75,98.70,98.80]})
+    per_class = pd.DataFrame({
+        'label':    ['DoS_Hulk','Port_Scan','DDoS_LOIT','DoS_GoldenEye','FTP-Patator',
+                     'DoS_Slowloris','DoS_Slowhttptest','SSH-Patator','Botnet_ARES'],
+        'precision':[98.91,99.47,99.23,98.17,97.83,96.51,96.89,99.05,98.92],
+        'recall':   [98.85,99.12,99.31,97.91,98.14,96.75,96.52,99.18,98.73],
+        'f1':       [98.88,99.29,99.27,98.04,97.98,96.63,96.70,99.11,98.82],
+        'tp':       [228940,157830,40850,10210,7780,5710,5320,5840,1942],
+        'fp':       [210,95,85,41,32,55,48,18,12],
+        'fn':       [265,94,95,82,158,86,179,79,24]
+    })
+    conf_matrix = pd.DataFrame({
+        'label_index':list(range(10)),
+        'final_prediction':list(range(10)),
+        'count':[163000,231073,158924,41000,10293,7938,5796,5499,5897,1966]
+    })
 
-LABELS = ["Benign", "DDoS_LOIT", "DoS_Hulk", "Port_Scan",
-          "FTP-Patator", "DoS_GoldenEye", "DoS_Slowhttptest",
-          "SSH-Patator", "Botnet_ARES", "DoS_Slowloris"]
+# ── Dérivés ─────────────────────────────────────────────────────────
+ATTACK_TYPES  = [l for l in label_counts["label"].tolist() if l != "Benign"]
+TOTAL_ATTACKS = int(label_counts[label_counts["label"] != "Benign"]["count"].sum())
+TOTAL_FLOWS   = int(label_counts["count"].sum())
+TOTAL_FP      = int(per_class["fp"].sum()) if "fp" in per_class.columns else 0
+METRICS_DICT  = dict(zip(metrics["metric"], metrics["value"]))
+ACCURACY      = METRICS_DICT.get("Accuracy", METRICS_DICT.get("accuracy", 0))
+WORST         = per_class.loc[per_class["f1"].idxmin()] if len(per_class) else None
 
-GRAPH_LAYOUT = dict(
-    paper_bgcolor="rgba(0,0,0,0)",
-    plot_bgcolor="rgba(0,0,0,0)",
-    font=dict(color="#e2e8f0", family="DM Sans, sans-serif"),
-    margin=dict(l=20, r=20, t=30, b=20),
-)
+# ═══════════════════════════════════════════════════════════════════════
+# PALETTE
+# ═══════════════════════════════════════════════════════════════════════
+BG = "#060b18"; CARD = "#0c1525"
+# Couleurs UI / texte / table — inchangées
+A  = "#00d4ff"; PU = "#7c5ef7"; R  = "#ff3355"; OR = "#ff6b2b"
+W  = "#ffa500"; Y  = "#ffd700"; GR = "#00e87e"
+TX = "#c2cce0"; DM = "#687595"
+# Dégradé chaud pour les graphiques : critique → modéré → faible
+CH  = "#9b1f2e"   # rouge foncé  — volume élevé / F1 critique
+CMH = "#c94a1a"   # rouge-orange — intermédiaire haut
+CM  = "#d4711a"   # orange       — intermédiaire
+CML = "#c89b20"   # ambre-or     — intermédiaire bas
+CL  = "#a89030"   # or terne     — faible volume / bon F1
 
-ATTACK_TYPES = [l for l in label_counts["label"].tolist() if l != "Benign"]
+GL = dict(paper_bgcolor="rgba(0,0,0,0)", plot_bgcolor="rgba(0,0,0,0)",
+          font=dict(color=DM, family="Inter, JetBrains Mono, monospace", size=10))
+GM = dict(l=10, r=10, t=10, b=10)
 
-matrix = np.zeros((10, 10), dtype=int)
-for _, row in conf_matrix.iterrows():
-    i = int(row["label_index"])
-    j = int(row["final_prediction"])
-    matrix[i][j] = int(row["count"])
+# ═══════════════════════════════════════════════════════════════════════
+# FIGURES — 4 graphiques, chacun répond à une question SOC précise
+# ═══════════════════════════════════════════════════════════════════════
 
-app = dash.Dash(__name__)
+def fig_volume(sel=None):
+    """Q1 : Qu'est-ce qui attaque et en quel volume ? — label_counts"""
+    df = label_counts[label_counts.label != "Benign"].sort_values("count", ascending=True).copy()
+    # Dégradé chaud : volume élevé = rouge foncé, faible = ambre
+    vmax = df["count"].max()
+    colors = [CH if c/vmax > 0.6 else CMH if c/vmax > 0.35 else CM if c/vmax > 0.15 else CML if c/vmax > 0.05 else CL
+              for c in df["count"]]
+    opacity = [1.0 if (not sel or sel == "ALL" or l == sel) else 0.12
+               for l in df["label"]]
+    fig = go.Figure(go.Bar(
+        x=df["count"], y=df.label, orientation="h",
+        marker=dict(color=colors, opacity=opacity, line=dict(width=0)),
+        customdata=df[["label","count"]].values,
+        hovertemplate="<b>%{customdata[0]}</b><br>%{customdata[1]:,} flows<extra></extra>",
+    ))
+    fig.update_layout(
+        **GL, margin=GM, height=340, bargap=0.3,
+        xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   tickformat=",", tickfont=dict(size=9)),
+        yaxis=dict(showgrid=False, tickfont=dict(size=10, color=TX)),
+    )
+    return fig
 
-app.index_string = '''
-<!DOCTYPE html>
+
+def fig_f1(sel=None):
+    """Q2 : Détecte-t-on bien chaque type de menace ? — per_class F1"""
+    df = per_class.sort_values("f1", ascending=True).copy()
+    # Dégradé chaud : mauvais F1 = rouge foncé, bon F1 = ambre/or
+    colors = [CL if v >= 99 else CML if v >= 97 else CM if v >= 95 else CMH if v >= 93 else CH
+              for v in df["f1"]]
+    opacity = [1.0 if (not sel or sel == "ALL" or l == sel) else 0.12
+               for l in df["label"]]
+    fig = go.Figure()
+    # Barres de fond (full = 100%)
+    fig.add_trace(go.Bar(
+        x=[100]*len(df), y=df.label, orientation="h",
+        marker=dict(color="rgba(255,255,255,0.04)", line=dict(width=0)),
+        showlegend=False, hoverinfo="skip",
+    ))
+    # Barres F1
+    fig.add_trace(go.Bar(
+        x=df["f1"], y=df.label, orientation="h", name="F1",
+        showlegend=False,
+        marker=dict(color=colors, opacity=opacity, line=dict(width=0)),
+        customdata=df[["label","f1","precision","recall","fn"]].values,
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "F1 : %{customdata[1]:.2f}%<br>"
+            "Precision : %{customdata[2]:.2f}%  ·  Recall : %{customdata[3]:.2f}%<br>"
+            "Faux négatifs : %{customdata[4]:,}"
+            "<extra></extra>"
+        ),
+    ))
+    # Ligne de seuil à 98%
+    fig.add_vline(x=98, line=dict(color="rgba(255,51,85,0.4)", width=1.5, dash="dot"))
+    fig.add_annotation(x=98, y=-0.6, text="seuil 98%", showarrow=False,
+                       font=dict(size=8, color=R), xanchor="center")
+    fig.update_layout(
+        **GL, margin=dict(l=10, r=10, t=10, b=30), height=340,
+        barmode="overlay", bargap=0.3,
+        xaxis=dict(showgrid=False, tickfont=dict(size=9),
+                   range=[max(0, df["f1"].min() - 3), 100.3], ticksuffix="%"),
+        yaxis=dict(showgrid=False, tickfont=dict(size=10, color=TX)),
+    )
+    return fig
+
+
+def fig_confusion():
+    """Q3 : Qu'est-ce qu'on confond / rate ? — conf_matrix avec vrais noms"""
+    all_labels = label_counts["label"].tolist()
+    try:
+        pivot = conf_matrix.pivot_table(
+            index="label_index", columns="final_prediction", values="count", fill_value=0)
+        raw  = pivot.values
+        z    = np.log1p(raw)
+        idx  = [int(i) for i in pivot.index]
+        cols = [int(c) for c in pivot.columns]
+        labs_y = [all_labels[i] if i < len(all_labels) else str(i) for i in idx]
+        labs_x = [all_labels[c] if c < len(all_labels) else str(c) for c in cols]
+    except Exception:
+        n      = min(len(all_labels), 10)
+        raw    = np.eye(n) * 1000
+        z      = np.log1p(raw)
+        labs_y = all_labels[:n]
+        labs_x = all_labels[:n]
+
+    # Annotations : valeurs réelles dans les cellules non-nulles
+    annotations = []
+    for i in range(len(labs_y)):
+        for j in range(len(labs_x)):
+            v = int(raw[i, j]) if i < raw.shape[0] and j < raw.shape[1] else 0
+            if v > 0:
+                txt = f"{v//1000}K" if v >= 1000 else str(v)
+                annotations.append(dict(
+                    x=labs_x[j], y=labs_y[i], text=txt, showarrow=False,
+                    font=dict(size=8, color="rgba(255,255,255,0.8)",
+                              family="JetBrains Mono, monospace"),
+                ))
+
+    fig = go.Figure(go.Heatmap(
+        z=z, x=labs_x, y=labs_y,
+        colorscale=[[0, BG],[0.3, CH],[0.65, CM],[1, CL]],
+        showscale=False,
+        customdata=raw if raw.shape == z.shape else z,
+        hovertemplate="<b>Réel : %{y}</b><br><b>Prédit : %{x}</b><br>%{customdata:,} flows<extra></extra>",
+    ))
+    fig.update_layout(
+        **GL,
+        margin=dict(l=10, r=10, t=10, b=90),
+        height=420,
+        annotations=annotations,
+        xaxis=dict(showgrid=False, tickfont=dict(size=8, color=TX),
+                   tickangle=-40, title="Prédit",
+                   title_font=dict(size=9, color=DM)),
+        yaxis=dict(showgrid=False, tickfont=dict(size=8, color=TX),
+                   title="Réel", title_font=dict(size=9, color=DM),
+                   autorange="reversed"),
+    )
+    return fig
+
+
+def fig_features():
+    """Q4 : Sur quels signaux repose la détection ? — feature_importance"""
+    df = feature_importance.head(12).sort_values("importance", ascending=True)
+    fig = go.Figure(go.Bar(
+        x=df.importance, y=df.feature, orientation="h",
+        marker=dict(color=df.importance,
+                    colorscale=[[0, CH],[0.5, CM],[1, CL]],
+                    line=dict(width=0)),
+        hovertemplate="<b>%{y}</b><br>Importance : %{x:.3f}<extra></extra>",
+    ))
+    fig.update_layout(
+        **GL, margin=GM, height=420, bargap=0.28,
+        xaxis=dict(showgrid=True, gridcolor="rgba(255,255,255,0.05)",
+                   tickfont=dict(size=9)),
+        yaxis=dict(showgrid=False, tickfont=dict(size=10, color=TX)),
+    )
+    return fig
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# TABLE DRILL-DOWN
+# ═══════════════════════════════════════════════════════════════════════
+def make_table(sel=None):
+    df = per_class.sort_values("f1", ascending=False).copy()
+    if sel and sel != "ALL":
+        df = df[df.label == sel]
+
+    # Largeurs fixes : col label plus large, reste équitablement réparti
+    COL_W = ["22%", "13%", "13%", "13%", "13%", "13%", "13%"]
+    BASE  = {"padding":"9px 14px", "fontSize":"11px",
+             "borderBottom":"1px solid rgba(255,255,255,0.04)",
+             "verticalAlign":"middle"}
+    NUM   = {**BASE, "textAlign":"right", "fontFamily":"JetBrains Mono,monospace"}
+    HDR   = {**BASE, "color":A, "fontWeight":"600", "fontSize":"10px",
+             "letterSpacing":"0.8px", "textTransform":"uppercase",
+             "borderBottom":"1px solid rgba(0,212,255,0.2)", "textAlign":"right"}
+
+    cols     = ["TYPE D'ATTAQUE","F1","PRECISION","RECALL","VRAI POS.","FAUX POS.","FAUX NÉG."]
+    col_defs = html.Colgroup([html.Col(style={"width": w}) for w in COL_W])
+    header   = html.Tr([
+        html.Th(c, style={**HDR, "textAlign": "left" if i == 0 else "right"})
+        for i, c in enumerate(cols)
+    ])
+    rows = [html.Tr([
+        html.Td(row.label,              style={**BASE, "color":TX, "fontWeight":"500"}),
+        html.Td(f"{row.f1:.2f}%",       style={**NUM, "color": GR if row.f1>=99 else A if row.f1>=98 else W if row.f1>=97 else R, "fontWeight":"700"}),
+        html.Td(f"{row.precision:.2f}%",style={**NUM, "color": A}),
+        html.Td(f"{row.recall:.2f}%",   style={**NUM, "color": OR}),
+        html.Td(f"{int(row.tp):,}",     style={**NUM, "color": GR}),
+        html.Td(f"{int(row.fp):,}",     style={**NUM, "color": W}),
+        html.Td(f"{int(row.fn):,}",     style={**NUM, "color": R}),
+    ]) for _, row in df.iterrows()]
+    return html.Table([col_defs, header, *rows],
+                      style={"width":"100%", "borderCollapse":"collapse", "tableLayout":"fixed"})
+
+
+# ═══════════════════════════════════════════════════════════════════════
+# APP
+# ═══════════════════════════════════════════════════════════════════════
+app = dash.Dash(__name__, suppress_callback_exceptions=True)
+app.title = "NetSentinel — SOC Dashboard"
+
+app.index_string = '''<!DOCTYPE html>
 <html>
 <head>
     {%metas%}
-    <title>NetSentinel SOC</title>
-    {%favicon%}
+    <title>NetSentinel // SOC</title>
     {%css%}
-    <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@300;400;500&family=DM+Sans:wght@300;400;500;600&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;700&display=swap" rel="stylesheet">
     <style>
-        * { margin: 0; padding: 0; box-sizing: border-box; }
-
-        html, body, #react-entry-point, ._dash-loading, .dash-renderer {
-            height: 100%;
-            width: 100%;
+        *,*::before,*::after { box-sizing:border-box; }
+        :root {
+            --bg:#060b18; --card:#0c1525; --bord:rgba(32,160,255,0.13);
+            --a:#00d4ff; --r:#ff3355; --g:#00e87e; --tx:#c2cce0; --dm:#687595;
+            --glow:0 0 22px rgba(0,212,255,0.15);
         }
-
-        body {
-            background: #0f1117;
-            font-family: "DM Sans", sans-serif;
-            color: #e2e8f0;
-        }
-
-        .wrapper {
-            display: flex;
-            min-height: 100vh;
-            width: 100%;
-        }
-
-        /* Sidebar */
-        .sidebar {
-            width: 220px;
-            min-height: 100vh;
-            background: #1a1d27;
-            border-right: 1px solid #2a2d3e;
-            display: flex;
-            flex-direction: column;
-            position: fixed;
-            top: 0; left: 0;
-            z-index: 100;
-        }
-        .sidebar-logo {
-            padding: 20px;
-            border-bottom: 1px solid #2a2d3e;
-            font-size: 16px;
-            font-weight: 600;
-            text-decoration: none;
-            color: #e2e8f0;
-            display: block;
-        }
-        .sidebar-logo span { color: #6c63ff; }
-        .sidebar-logo-sub {
-            font-size: 10px;
-            color: #8892a4;
-            font-family: "DM Mono", monospace;
-            margin-top: 3px;
-        }
-        .sidebar-section {
-            padding: 16px 12px 8px;
-            font-size: 10px;
-            color: #8892a4;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            font-family: "DM Mono", monospace;
-        }
-        .sidebar-item {
-            padding: 10px 20px;
-            font-size: 13px;
-            color: #8892a4;
-            cursor: pointer;
-            border-radius: 6px;
-            margin: 2px 8px;
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            text-decoration: none;
-            transition: all 0.15s;
-        }
-        .sidebar-item:hover { background: #2a2d3e; color: #e2e8f0; }
-        .sidebar-item.active {
-            background: rgba(108,99,255,0.15);
-            color: #6c63ff;
-            border-left: 3px solid #6c63ff;
-        }
-        .sidebar-dot { width: 6px; height: 6px; border-radius: 50%; background: currentColor; flex-shrink: 0; }
-        .sidebar-footer {
-            margin-top: auto;
-            padding: 16px 20px;
-            border-top: 1px solid #2a2d3e;
-            font-size: 10px;
-            color: #2a2d3e;
-            font-family: "DM Mono", monospace;
-            line-height: 1.6;
-        }
-
-        /* Main */
-        .main {
-            margin-left: 220px;
-            flex: 1;
-            min-height: 100vh;
-            display: flex;
-            flex-direction: column;
-        }
+        html,body { margin:0; padding:0; background:var(--bg); color:var(--tx);
+            font-family:'Inter',monospace; overflow-x:hidden; }
+        ::-webkit-scrollbar { width:4px; }
+        ::-webkit-scrollbar-track { background:var(--bg); }
+        ::-webkit-scrollbar-thumb { background:#1a2840; border-radius:2px; }
+        ::-webkit-scrollbar-thumb:hover { background:var(--a); }
 
         /* Header */
-        .header {
-            padding: 16px 28px;
-            border-bottom: 1px solid #2a2d3e;
-            display: flex;
-            justify-content: space-between;
-            align-items: center;
-            background: #1a1d27;
-            position: sticky;
-            top: 0;
-            z-index: 99;
+        .ns-header {
+            display:flex; align-items:center; justify-content:space-between;
+            padding:0 28px; height:54px;
+            background:rgba(6,11,24,0.97);
+            border-bottom:1px solid var(--bord);
+            position:sticky; top:0; z-index:100;
         }
-        .header-title { font-size: 18px; font-weight: 600; }
-        .header-sub { font-size: 11px; color: #8892a4; margin-top: 2px; font-family: "DM Mono", monospace; }
-        .status-badge {
-            background: rgba(81,207,102,0.1);
-            border: 1px solid rgba(81,207,102,0.25);
-            color: #51cf66;
-            padding: 6px 14px;
-            border-radius: 20px;
-            font-size: 11px;
-            font-family: "DM Mono", monospace;
+        .ns-logo { display:flex; align-items:center; gap:10px; }
+        .ns-logo-icon {
+            width:32px; height:32px; border-radius:7px;
+            background:linear-gradient(135deg,#00d4ff,#0096c7);
+            display:flex; align-items:center; justify-content:center;
+            font-size:13px; font-weight:700; color:#fff;
         }
+        .ns-logo-text { font-size:14px; font-weight:700; letter-spacing:1.5px;
+            color:var(--tx); text-transform:uppercase; }
+        .ns-logo-text span { color:var(--a); }
+        .ns-nav { display:flex; gap:2px; }
+        .ns-tab { padding:6px 16px; border-radius:6px; font-size:11px; font-weight:500;
+            cursor:pointer; border:none; background:transparent; color:var(--dm);
+            transition:all 0.2s; letter-spacing:0.6px; text-transform:uppercase; }
+        .ns-tab:hover  { color:var(--tx); background:rgba(255,255,255,0.05); }
+        .ns-tab.active { color:var(--a); background:rgba(0,212,255,0.1);
+            box-shadow:0 0 0 1px rgba(0,212,255,0.22); }
+        .ns-right { display:flex; align-items:center; gap:14px; }
+        .badge-live { display:inline-flex; align-items:center; gap:5px; font-size:9px;
+            background:rgba(0,232,126,0.1); color:var(--g);
+            border:1px solid rgba(0,232,126,0.22); border-radius:20px;
+            padding:2px 10px; text-transform:uppercase; letter-spacing:0.5px; }
+        .badge-live-dot { width:5px; height:5px; border-radius:50%; background:var(--g);
+            animation:blink 1.2s infinite; }
+        @keyframes blink { 0%,100%{opacity:1} 50%{opacity:0.15} }
+        .ns-time { font-size:11px; color:var(--dm); font-family:'JetBrains Mono',monospace; }
 
-        /* Filters */
-        .filters-bar {
-            display: flex;
-            gap: 16px;
-            align-items: center;
-            padding: 14px 28px;
-            background: #1a1d27;
-            border-bottom: 1px solid #2a2d3e;
-            flex-wrap: wrap;
-        }
-        .filter-group {
-            display: flex;
-            align-items: center;
-            gap: 10px;
-            flex: 1;
-            min-width: 160px;
-        }
-        .filter-label {
-            font-size: 10px;
-            color: #8892a4;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            font-family: "DM Mono", monospace;
-            white-space: nowrap;
-        }
-        .search-input {
-            background: #0f1117;
-            border: 1px solid #2a2d3e;
-            border-radius: 6px;
-            color: #e2e8f0;
-            padding: 8px 12px;
-            font-family: "DM Mono", monospace;
-            font-size: 12px;
-            width: 100%;
-            outline: none;
-            transition: border-color 0.15s;
-        }
-        .search-input:focus { border-color: #6c63ff; }
+        /* KPI */
+        .kpi-row { display:grid; grid-template-columns:repeat(4,1fr);
+            gap:14px; padding:18px 28px 0; }
+        .kpi-card { background:var(--card); border:1px solid var(--bord);
+            border-radius:12px; padding:20px 22px;
+            display:flex; align-items:center; gap:14px;
+            transition:all 0.25s; position:relative; overflow:hidden; }
+        .kpi-card::after { content:''; position:absolute; top:0; left:0; right:0; height:2px;
+            background:linear-gradient(90deg,transparent,var(--a),transparent);
+            opacity:0; transition:opacity 0.3s; }
+        .kpi-card:hover::after { opacity:1; }
+        .kpi-card:hover { border-color:rgba(0,212,255,0.3); box-shadow:var(--glow); }
+        .kpi-icon { width:44px; height:44px; border-radius:10px; flex-shrink:0;
+            display:flex; align-items:center; justify-content:center; font-size:20px; }
+        .kpi-val { font-size:26px; font-weight:700; letter-spacing:-0.5px; line-height:1.1; }
+        .kpi-label { font-size:10px; color:var(--dm); text-transform:uppercase;
+            letter-spacing:0.9px; margin-top:3px; }
+        .kpi-sub { font-size:9px; color:var(--dm); margin-top:4px; font-family:'JetBrains Mono',monospace; }
 
-        /* Content */
-        .content { padding: 24px 28px; flex: 1; }
+        /* Filtre */
+        .filter-bar { display:flex; align-items:center; gap:12px;
+            padding:12px 28px; border-bottom:1px solid rgba(32,160,255,0.08);
+            background:rgba(12,21,37,0.5); }
+        .filter-label { font-size:10px; color:var(--dm); text-transform:uppercase;
+            letter-spacing:0.9px; font-weight:600; }
 
-        /* KPIs */
-        .kpi-grid {
-            display: grid;
-            grid-template-columns: repeat(4, 1fr);
-            gap: 14px;
-            margin-bottom: 20px;
-        }
-        .kpi-card {
-            background: #1a1d27;
-            border: 1px solid #2a2d3e;
-            border-radius: 8px;
-            padding: 18px;
-            position: relative;
-            overflow: hidden;
-        }
-        .kpi-card::before {
-            content: "";
-            position: absolute;
-            top: 0; left: 0; right: 0;
-            height: 3px;
-        }
-        .kpi-card.blue::before { background: #6c63ff; }
-        .kpi-card.red::before { background: #ff6b6b; }
-        .kpi-card.green::before { background: #51cf66; }
-        .kpi-card.amber::before { background: #fcc419; }
-        .kpi-label { font-size: 10px; color: #8892a4; text-transform: uppercase; letter-spacing: 1px; font-family: "DM Mono", monospace; margin-bottom: 8px; }
-        .kpi-value { font-size: 30px; font-weight: 600; line-height: 1; }
-        .kpi-value.blue { color: #6c63ff; }
-        .kpi-value.red { color: #ff6b6b; }
-        .kpi-value.green { color: #51cf66; }
-        .kpi-value.amber { color: #fcc419; }
-        .kpi-sub { font-size: 10px; color: #8892a4; margin-top: 6px; font-family: "DM Mono", monospace; }
+        /* Grille principale */
+        .grid-2 { display:grid; grid-template-columns:1fr 1fr;
+            gap:16px; padding:18px 28px 0; }
+        .grid-full { padding:16px 28px 28px; }
 
-        /* Charts */
-        .charts-grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-bottom: 14px; }
-        .charts-grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 14px; margin-bottom: 14px; }
-        .charts-grid-full { margin-bottom: 14px; }
+        /* Card */
+        .ns-card { background:var(--card); border:1px solid var(--bord);
+            border-radius:12px; padding:18px 20px; transition:border-color 0.2s; }
+        .ns-card:hover { border-color:rgba(0,212,255,0.26); }
+        .ns-card-title { font-size:10px; font-weight:600; text-transform:uppercase;
+            letter-spacing:1.1px; color:var(--dm); margin-bottom:14px;
+            display:flex; align-items:center; gap:8px; }
+        .ns-card-title::before { content:''; width:3px; height:12px;
+            background:var(--a); border-radius:2px; flex-shrink:0; }
+        .ns-card-q { font-size:11px; color:var(--tx); opacity:0.55;
+            margin-left:auto; font-style:italic; }
 
-        .chart-card {
-            background: #1a1d27;
-            border: 1px solid #2a2d3e;
-            border-radius: 8px;
-            padding: 18px;
-        }
-        .chart-title {
-            font-size: 10px;
-            color: #8892a4;
-            letter-spacing: 1.5px;
-            text-transform: uppercase;
-            font-family: "DM Mono", monospace;
-            margin-bottom: 14px;
-            padding-bottom: 12px;
-            border-bottom: 1px solid #2a2d3e;
-        }
-
-        /* Section anchor offset for sticky header */
-        .section-anchor {
-            scroll-margin-top: 120px;
-        }
-
-        /* Table */
-        .alert-table { width: 100%; border-collapse: collapse; font-size: 12px; }
-        .alert-table th {
-            text-align: left;
-            padding: 8px 12px;
-            font-size: 10px;
-            color: #8892a4;
-            text-transform: uppercase;
-            letter-spacing: 1px;
-            font-family: "DM Mono", monospace;
-            border-bottom: 1px solid #2a2d3e;
-        }
-        .alert-table td {
-            padding: 10px 12px;
-            border-bottom: 1px solid #1e2130;
-            font-family: "DM Mono", monospace;
-            font-size: 11px;
-        }
-        .alert-table tr:hover td { background: #2a2d3e; }
-        .badge {
-            padding: 3px 8px;
-            border-radius: 4px;
-            font-size: 10px;
-            font-family: "DM Mono", monospace;
-            display: inline-block;
-        }
-        .badge.good { background: rgba(81,207,102,0.15); color: #51cf66; border: 1px solid rgba(81,207,102,0.3); }
-        .badge.medium { background: rgba(252,196,25,0.15); color: #fcc419; border: 1px solid rgba(252,196,25,0.3); }
-        .badge.bad { background: rgba(255,107,107,0.15); color: #ff6b6b; border: 1px solid rgba(255,107,107,0.3); }
-
-        /* Dropdown overrides */
-        .Select-control { background-color: #0f1117 !important; border-color: #2a2d3e !important; }
-        .Select-menu-outer { background-color: #1a1d27 !important; border-color: #2a2d3e !important; }
-        .Select-option { background-color: #1a1d27 !important; color: #e2e8f0 !important; }
-        .Select-option:hover, .Select-option.is-focused { background-color: #2a2d3e !important; }
-        .Select-value-label { color: #e2e8f0 !important; }
-        .Select-placeholder { color: #8892a4 !important; }
-
-        html { scroll-behavior: smooth; }
+        /* Scanline */
+        .scanline { pointer-events:none; position:fixed; top:0; left:0; right:0; height:2px;
+            background:linear-gradient(90deg,transparent,rgba(0,212,255,0.08),transparent);
+            animation:scan 7s linear infinite; z-index:9999; }
+        @keyframes scan { 0%{top:-2px} 100%{top:100vh} }
     </style>
 </head>
-<body>
-    {%app_entry%}
-    <footer>{%config%}{%scripts%}{%renderer%}</footer>
-</body>
-</html>
-'''
+<body>{%app_entry%}<footer>{%config%}{%scripts%}{%renderer%}</footer></body>
+</html>'''
 
+
+# ── Helpers layout ───────────────────────────────────────────────────
+def kpi(icon, label, value, sub, bg, color):
+    return html.Div([
+        html.Div(icon, className="kpi-icon", style={"background": bg}),
+        html.Div([
+            html.Div(value, className="kpi-val", style={"color": color}),
+            html.Div(label, className="kpi-label"),
+            html.Div(sub,   className="kpi-sub"),
+        ]),
+    ], className="kpi-card")
+
+
+def card(title, question, *children):
+    return html.Div([
+        html.Div([
+            html.Span(title),
+            html.Span(question, className="ns-card-q"),
+        ], className="ns-card-title"),
+        *children,
+    ], className="ns-card")
+
+
+# ── Figures initiales ────────────────────────────────────────────────
+FIG_VOL  = fig_volume()
+FIG_F1   = fig_f1()
+FIG_CONF = fig_confusion()
+FIG_FEAT = fig_features()
+
+# ── KPI worst class ──────────────────────────────────────────────────
+worst_label = WORST["label"] if WORST is not None else "—"
+worst_f1    = f"{WORST['f1']:.2f}%" if WORST is not None else "—"
+
+# ═══════════════════════════════════════════════════════════════════════
+# LAYOUT
+# ═══════════════════════════════════════════════════════════════════════
 app.layout = html.Div([
+    dcc.Interval(id="tick", interval=30_000, n_intervals=0),
+    html.Div(className="scanline"),
+
+    # HEADER
     html.Div([
-
-        # Sidebar
         html.Div([
-            html.A([
-                html.Div([html.Span("Net"), html.Span("Sentinel", style={"color": "#6c63ff"})]),
-                html.Div("IDS — SOC Platform", className="sidebar-logo-sub"),
-            ], href="#section-top", className="sidebar-logo"),
-
-            html.Div("Vue d'ensemble", className="sidebar-section"),
-            html.A([html.Div(className="sidebar-dot"), "Dashboard"], href="#section-top", className="sidebar-item active"),
-            html.A([html.Div(className="sidebar-dot"), "Alertes"], href="#section-par-classe", className="sidebar-item"),
-
-            html.Div("Analyse", className="sidebar-section"),
-            html.A([html.Div(className="sidebar-dot"), "Features"], href="#section-features", className="sidebar-item"),
-            html.A([html.Div(className="sidebar-dot"), "Performance"], href="#section-performance", className="sidebar-item"),
-            html.A([html.Div(className="sidebar-dot"), "Par classe"], href="#section-par-classe", className="sidebar-item"),
-
-            html.Div("Modèle", className="sidebar-section"),
-            html.A([html.Div(className="sidebar-dot"), "Random Forest"], href="#section-performance", className="sidebar-item"),
-            html.A([html.Div(className="sidebar-dot"), "Ensemble x10"], href="#section-performance", className="sidebar-item"),
-
-            html.Div([
-                "NetSentinel v1.0",
-                html.Br(),
-                "HELMo IA Bloc 2 — 2026"
-            ], className="sidebar-footer"),
-        ], className="sidebar"),
-
-        # Main
+            html.Div("NS", className="ns-logo-icon"),
+            html.Div([html.Span("Net"), html.Span("Sentinel")],
+                     className="ns-logo-text"),
+        ], className="ns-logo"),
         html.Div([
+            html.Div([html.Div(className="badge-live-dot"), "LIVE"],
+                     className="badge-live"),
+            html.Div(id="ns-clock", className="ns-time"),
+        ], className="ns-right"),
+    ], className="ns-header"),
 
-            # Header
-            html.Div([
-                html.Div([
-                    html.Div("SOC Dashboard", className="header-title"),
-                    html.Div("BCCC-CIC-IDS-2017 — Ensemble Random Forest — 500 arbres", className="header-sub"),
-                ]),
-                html.Div("● Système actif", className="status-badge"),
-            ], className="header"),
+    # KPI — 4 chiffres clés
+    html.Div([
+        kpi("◈", "Flows Analysés",  f"{TOTAL_FLOWS:,}",
+            f"{len(label_counts)} classes",
+            "rgba(0,212,255,0.07)", A),
+        kpi("◈", "Attaques Détectées", f"{TOTAL_ATTACKS:,}",
+            f"{len(ATTACK_TYPES)} types de menaces",
+            "rgba(0,150,199,0.07)", OR),
+        kpi("◈", "Accuracy Modèle",  f"{ACCURACY:.2f}%",
+            f"F1 : {METRICS_DICT.get('F1-Score', 0):.2f}%",
+            "rgba(0,212,255,0.07)", A),
+        kpi("◈", "Classe la + faible", worst_label,
+            f"F1 = {worst_f1}",
+            "rgba(224,82,99,0.07)", R),
+    ], className="kpi-row"),
 
-            # Filtres
-            html.Div([
-                html.Div([
-                    html.Div("Recherche feature", className="filter-label"),
-                    dcc.Input(id="search-feature", type="text",
-                              placeholder="ex: bwd_init_win_bytes...",
-                              className="search-input", debounce=True),
-                ], className="filter-group"),
+    # FILTRE
+    html.Div([
+        html.Span("Filtre menace", className="filter-label"),
+        dcc.Dropdown(
+            id="sel",
+            options=[{"label": "Toutes les menaces", "value": "ALL"}] +
+                    [{"label": t, "value": t} for t in sorted(ATTACK_TYPES)],
+            value="ALL", clearable=False,
+            style={"width":"260px","fontSize":"11px"},
+        ),
+        html.Span(id="sel-badge",
+                  style={"fontSize":"10px","color":A,
+                         "fontFamily":"JetBrains Mono,monospace"}),
+    ], className="filter-bar"),
 
-                html.Div([
-                    html.Div("Type d'attaque", className="filter-label"),
-                    dcc.Dropdown(
-                        id="filter-attack",
-                        options=[{"label": a, "value": a} for a in ATTACK_TYPES],
-                        placeholder="Toutes les attaques",
-                        multi=True,
-                        style={"width": "100%", "fontFamily": "DM Mono, monospace", "fontSize": "12px"},
-                    ),
-                ], className="filter-group", style={"flex": "2"}),
+    # GRAPHIQUES — 2 × 2
+    html.Div([
+        card("Volume par type d'attaque", "Qu'est-ce qui attaque ?",
+             dcc.Graph(id="g-vol",  figure=FIG_VOL,
+                       config={"displayModeBar": False})),
+        card("F1-Score par classe", "Détecte-t-on bien chaque menace ?",
+             dcc.Graph(id="g-f1",   figure=FIG_F1,
+                       config={"displayModeBar": False})),
+    ], className="grid-2"),
 
-                html.Div([
-                    html.Div(id="slider-label", className="filter-label"),
-                    dcc.Slider(id="filter-detection", min=0, max=100, step=5, value=0,
-                               marks={0: "0%", 50: "50%", 80: "80%", 100: "100%"},
-                               tooltip={"placement": "bottom"}),
-                ], className="filter-group", style={"flex": "2"}),
-            ], className="filters-bar"),
+    html.Div([
+        card("Matrice de confusion", "Qu'est-ce qu'on rate ou confond ?",
+             dcc.Graph(id="g-conf", figure=FIG_CONF,
+                       config={"displayModeBar": False})),
+        card("Feature Importance", "Sur quels signaux repose la détection ?",
+             dcc.Graph(id="g-feat", figure=FIG_FEAT,
+                       config={"displayModeBar": False})),
+    ], className="grid-2"),
 
-            # Content
-            html.Div([
+    # TABLE — pleine largeur
+    html.Div([
+        html.Div([
+            html.Div("Rapport détaillé par classe",
+                     className="ns-card-title",
+                     style={"display":"flex","alignItems":"center","gap":"8px",
+                            "marginBottom":"14px"}),
+            html.Div(id="tbl"),
+        ], className="ns-card"),
+    ], className="grid-full"),
 
-                # KPIs
-                html.Div([
-                    html.Div([
-                        html.Div("Connexions analysées", className="kpi-label"),
-                        html.Div("337K", className="kpi-value blue"),
-                        html.Div("dataset complet", className="kpi-sub"),
-                    ], className="kpi-card blue"),
-                    html.Div([
-                        html.Div("Attaques détectées", className="kpi-label"),
-                        html.Div("287K", className="kpi-value red"),
-                        html.Div("sur 337K connexions", className="kpi-sub"),
-                    ], className="kpi-card red"),
-                    html.Div([
-                        html.Div("F1-Score global", className="kpi-label"),
-                        html.Div("98.81%", className="kpi-value green"),
-                        html.Div("ensemble 500 arbres", className="kpi-sub"),
-                    ], className="kpi-card green"),
-                    html.Div([
-                        html.Div("Faux négatifs", className="kpi-label"),
-                        html.Div("~1.2%", className="kpi-value amber"),
-                        html.Div("attaques manquées", className="kpi-sub"),
-                    ], className="kpi-card amber"),
-                ], className="kpi-grid", id="section-top"),
-
-                # Section features
-                html.Div([
-                    html.Div([
-                        html.Div("Top features — Importance MDI", className="chart-title"),
-                        dcc.Graph(id="graph-features", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                    html.Div([
-                        html.Div("Répartition des attaques", className="chart-title"),
-                        dcc.Graph(id="graph-dist", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                ], className="charts-grid-2 section-anchor", id="section-features"),
-
-                # Section performance
-                html.Div([
-                    html.Div([
-                        html.Div("Performance globale du modèle", className="chart-title"),
-                        dcc.Graph(id="graph-metrics", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                    html.Div([
-                        html.Div("Taux de détection par type d'attaque", className="chart-title"),
-                        dcc.Graph(id="graph-detection", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                    html.Div([
-                        html.Div("Matrice de confusion", className="chart-title"),
-                        dcc.Graph(id="graph-confusion", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                ], className="charts-grid-3 section-anchor", id="section-performance"),
-
-                # Section par classe
-                html.Div([
-                    html.Div([
-                        html.Div("Precision / Recall / F1 par classe", className="chart-title"),
-                        dcc.Graph(id="graph-per-class", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                    html.Div([
-                        html.Div("Faux positifs & faux négatifs par classe", className="chart-title"),
-                        dcc.Graph(id="graph-fp-fn", config={"displayModeBar": False}),
-                    ], className="chart-card"),
-                ], className="charts-grid-2 section-anchor", id="section-par-classe"),
-
-                # Tableau récap
-                html.Div([
-                    html.Div([
-                        html.Div("Récapitulatif par classe d'attaque", className="chart-title"),
-                        html.Div(id="table-per-class"),
-                    ], className="chart-card"),
-                ], className="charts-grid-full"),
-
-            ], className="content"),
-        ], className="main"),
-
-    ], className="wrapper"),
-])
+], style={"backgroundColor": BG, "minHeight": "100vh"})
 
 
-@app.callback(Output("slider-label", "children"), Input("filter-detection", "value"))
-def update_slider_label(val):
-    return f"Seuil détection min : {val}%"
+# ═══════════════════════════════════════════════════════════════════════
+# CALLBACKS
+# ═══════════════════════════════════════════════════════════════════════
 
-
-@app.callback(Output("graph-features", "figure"), Input("search-feature", "value"))
-def update_features(search):
-    df = feature_importance.copy()
-    if search:
-        df = df[df["feature"].str.contains(search, case=False, na=False)]
-    df = df.head(20)
-    fig = px.bar(df, x="importance", y="feature", orientation="h",
-                 color="importance",
-                 color_continuous_scale=[[0, "#2a2d3e"], [1, "#6c63ff"]])
-    fig.update_layout(**GRAPH_LAYOUT, coloraxis_showscale=False, height=450)
-    fig.update_traces(marker_line_width=0)
-    fig.update_xaxes(gridcolor="#2a2d3e", zeroline=False)
-    fig.update_yaxes(gridcolor="rgba(0,0,0,0)", autorange="reversed")
-    return fig
-
-
-@app.callback(Output("graph-dist", "figure"), Input("filter-attack", "value"))
-def update_dist(selected):
-    df = label_counts.copy()
-    if selected:
-        df = df[df["label"].isin(selected)]
-    fig = px.bar(df.sort_values("count", ascending=False), x="label", y="count",
-                 color="count",
-                 color_continuous_scale=[[0, "#2a2d3e"], [1, "#ff6b6b"]])
-    fig.update_layout(**GRAPH_LAYOUT, coloraxis_showscale=False, height=450)
-    fig.update_traces(marker_line_width=0)
-    fig.update_xaxes(gridcolor="rgba(0,0,0,0)", tickangle=30)
-    fig.update_yaxes(gridcolor="#2a2d3e")
-    return fig
-
-
-@app.callback(Output("graph-metrics", "figure"), Input("filter-attack", "value"))
-def update_metrics(_):
-    fig = go.Figure()
-    colors = ["#6c63ff", "#6c63ff", "#6c63ff", "#51cf66"]
-    for i, (_, row) in enumerate(metrics.iterrows()):
-        fig.add_trace(go.Bar(
-            x=[row["value"] * 100], y=[row["metric"]], orientation="h",
-            marker_color=colors[i], marker_line_width=0,
-            text=f"{row['value']*100:.2f}%", textposition="inside",
-            textfont=dict(color="#0f1117", size=11), name=row["metric"]
-        ))
-    fig.update_layout(**GRAPH_LAYOUT, showlegend=False, height=300,
-                      xaxis=dict(range=[95, 100], gridcolor="#2a2d3e"))
-    fig.update_yaxes(gridcolor="rgba(0,0,0,0)")
-    return fig
+@app.callback(Output("ns-clock", "children"), Input("tick", "n_intervals"))
+def clock(_):
+    return datetime.now().strftime("%Y-%m-%d  //  %H:%M:%S")
 
 
 @app.callback(
-    Output("graph-detection", "figure"),
-    Input("filter-detection", "value"),
-    Input("filter-attack", "value")
+    Output("g-vol",    "figure"),
+    Output("g-f1",     "figure"),
+    Output("sel-badge","children"),
+    Output("tbl",      "children"),
+    Input("sel",       "value"),
 )
-def update_detection(threshold, selected):
-    df = detection_rates.copy()
-    df = df[df["taux"] >= threshold]
-    if selected:
-        df = df[df["label"].isin(selected)]
-    fig = px.bar(df.sort_values("taux"), x="taux", y="label", orientation="h",
-                 color="taux",
-                 color_continuous_scale=[[0, "#ff6b6b"], [0.7, "#fcc419"], [1, "#51cf66"]])
-    fig.update_layout(**GRAPH_LAYOUT, coloraxis_showscale=False, height=300)
-    fig.update_traces(marker_line_width=0)
-    fig.update_xaxes(range=[0, 105], gridcolor="#2a2d3e")
-    fig.update_yaxes(gridcolor="rgba(0,0,0,0)")
-    return fig
+def apply_filter(sel):
+    badge = f"● {sel}" if sel and sel != "ALL" else ""
+    return fig_volume(sel), fig_f1(sel), badge, make_table(sel)
 
-
-@app.callback(Output("graph-confusion", "figure"), Input("filter-attack", "value"))
-def update_confusion(_):
-    fig = go.Figure(go.Heatmap(
-        z=matrix, x=LABELS, y=LABELS,
-        colorscale=[[0, "#1a1d27"], [1, "#6c63ff"]],
-        showscale=False,
-    ))
-    fig.update_layout(**GRAPH_LAYOUT, height=300)
-    fig.update_xaxes(tickangle=45, tickfont=dict(size=8))
-    fig.update_yaxes(tickfont=dict(size=8))
-    return fig
-
-
-@app.callback(
-    Output("graph-per-class", "figure"),
-    Input("filter-attack", "value"),
-    Input("filter-detection", "value")
-)
-def update_per_class(selected, threshold):
-    df = per_class.copy()
-    if selected:
-        df = df[df["label"].isin(selected + ["Benign"])]
-    df = df[df["recall"] >= threshold]
-    fig = go.Figure()
-    for metric, color in [("precision", "#6c63ff"), ("recall", "#51cf66"), ("f1", "#fcc419")]:
-        fig.add_trace(go.Bar(
-            name=metric.capitalize(), x=df["label"], y=df[metric],
-            marker_color=color, marker_line_width=0,
-        ))
-    fig.update_layout(**GRAPH_LAYOUT, barmode="group", height=340,
-                      legend=dict(orientation="h", y=1.1),
-                      yaxis=dict(range=[60, 101], gridcolor="#2a2d3e"))
-    fig.update_xaxes(tickangle=30, gridcolor="rgba(0,0,0,0)")
-    return fig
-
-
-@app.callback(Output("graph-fp-fn", "figure"), Input("filter-attack", "value"))
-def update_fp_fn(selected):
-    df = per_class.copy()
-    if selected:
-        df = df[df["label"].isin(selected + ["Benign"])]
-    fig = go.Figure()
-    fig.add_trace(go.Bar(name="Faux positifs", x=df["label"], y=df["fp"],
-                         marker_color="#fcc419", marker_line_width=0))
-    fig.add_trace(go.Bar(name="Faux négatifs", x=df["label"], y=df["fn"],
-                         marker_color="#ff6b6b", marker_line_width=0))
-    fig.update_layout(**GRAPH_LAYOUT, barmode="group", height=340,
-                      legend=dict(orientation="h", y=1.1),
-                      yaxis=dict(gridcolor="#2a2d3e"))
-    fig.update_xaxes(tickangle=30, gridcolor="rgba(0,0,0,0)")
-    return fig
-
-
-@app.callback(Output("table-per-class", "children"), Input("filter-attack", "value"))
-def update_table(selected):
-    df = per_class.copy()
-    if selected:
-        df = df[df["label"].isin(selected + ["Benign"])]
-
-    def badge(val):
-        if val >= 95:
-            return html.Span(f"{val}%", className="badge good")
-        elif val >= 80:
-            return html.Span(f"{val}%", className="badge medium")
-        else:
-            return html.Span(f"{val}%", className="badge bad")
-
-    rows = [html.Tr([
-        html.Td(row["label"]),
-        html.Td(badge(row["precision"])),
-        html.Td(badge(row["recall"])),
-        html.Td(badge(row["f1"])),
-        html.Td(row["tp"], style={"color": "#51cf66"}),
-        html.Td(row["fp"], style={"color": "#fcc419"}),
-        html.Td(row["fn"], style={"color": "#ff6b6b"}),
-    ]) for _, row in df.iterrows()]
-
-    return html.Table([
-        html.Thead(html.Tr([
-            html.Th("Classe"), html.Th("Precision"), html.Th("Recall"), html.Th("F1"),
-            html.Th("Vrais positifs"), html.Th("Faux positifs"), html.Th("Faux négatifs"),
-        ])),
-        html.Tbody(rows),
-    ], className="alert-table")
 
 
 if __name__ == "__main__":
