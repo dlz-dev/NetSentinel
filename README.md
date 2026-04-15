@@ -57,36 +57,10 @@ Construire un pipeline Big Data de détection d'intrusions réseau en deux phase
 
 ## Architecture du pipeline
 
-```
-data/raw (CSV)
-     │
-     ▼
-┌─────────────────────────────────────────────────┐
-│               PHASE BATCH (Spark)               │
-│                                                 │
-│  Ingestion CSV → Nettoyage → Feature Eng.       │
-│       → ML (Random Forest x10)                  │
-│       → Évaluation → Export Delta Lake          │
-└──────────────────────┬──────────────────────────┘
-                       │
-              data/dashboard/ (Delta)
-                       │
-                       ▼
-              ┌─────────────────┐
-              │    Dashboard    │
-              │  (Dash/Plotly)  │
-              └─────────────────┘
-
-data/models/ (10 RF sauvegardés)
-     │
-     ▼
-┌─────────────────────────────────────────────────┐
-│            PHASE STREAMING (Spark)              │
-│                                                 │
-│  Flux réseau → Modèle chargé → Prédiction       │
-│              → Alertes IT en temps réel         │
-└─────────────────────────────────────────────────┘
-```
+<div align="center">
+  <img src="assets/schema_architecture_pipeline.png" width="400" alt="Architecture du pipeline"/>
+  <p><em>Architecture Pipeline NetSentinel</em></p>
+</div>
 
 ---
 
