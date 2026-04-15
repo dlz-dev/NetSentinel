@@ -12,6 +12,13 @@
 
 ---
 
+<div align="center">
+  <img src="assets/photo_couverture_netsentinel.png" width="700" alt="Photo de couverture NetSentinel"/>
+  <p><em>Dashboard NetSentinel</em></p>
+</div>
+
+---
+
 ## Contexte
 
 Une grande entreprise industrielle génère en permanence des milliers de connexions réseau. Face à la montée des cyberattaques — DDoS, SQL Injection, Botnet, Brute Force... — le service IT a besoin d'un système capable d'**analyser le trafic réseau et de détecter les intrusions**, aussi bien sur l'historique qu'en temps réel.
