@@ -57,9 +57,9 @@ data/raw (CSV)
 ┌─────────────────────────────────────────────────┐
 │               PHASE BATCH (Spark)               │
 │                                                 │
-│  Ingestion CSV → Nettoyage → Feature Eng.      │
-│       → ML (Random Forest x10)                 │
-│       → Évaluation → Export Delta Lake         │
+│  Ingestion CSV → Nettoyage → Feature Eng.       │
+│       → ML (Random Forest x10)                  │
+│       → Évaluation → Export Delta Lake          │
 └──────────────────────┬──────────────────────────┘
                        │
               data/dashboard/ (Delta)
@@ -76,8 +76,8 @@ data/models/ (10 RF sauvegardés)
 ┌─────────────────────────────────────────────────┐
 │            PHASE STREAMING (Spark)              │
 │                                                 │
-│  Flux réseau → Modèle chargé → Prédiction      │
-│              → Alertes IT en temps réel        │
+│  Flux réseau → Modèle chargé → Prédiction       │
+│              → Alertes IT en temps réel         │
 └─────────────────────────────────────────────────┘
 ```
 
@@ -95,7 +95,7 @@ Pour ne pas biaiser le modèle, j'ai décidé de :
 - Ne garder que les **10 classes les plus pertinentes** pour une entreprise
 
 <div align="center">
-  <img src="data/docs/distribution_attaques.png" width="700" alt="Distribution des attaques"/>
+  <img src="assets/distribution_attaques.png" width="700" alt="Distribution des attaques"/>
   <p><em>Distribution des classes après équilibrage</em></p>
 </div>
 
@@ -143,7 +143,7 @@ Cette approche donne :
 - Un vote plus robuste sur les cas limites entre deux classes proches
 
 <div align="center">
-  <img src="data/individual_vs_ensemble.png" width="700" alt="Modèles individuels vs ensemble"/>
+  <img src="assets/individual_vs_ensemble.png" width="700" alt="Modèles individuels vs ensemble"/>
   <p><em>F1-Score de chaque modèle individuel vs l'ensemble — le gain du bagging</em></p>
 </div>
 
@@ -152,7 +152,7 @@ Cette approche donne :
 ### 4. Feature Importance
 
 <div align="center">
-  <img src="data/docs/features_importance.png" width="700" alt="Feature importance"/>
+  <img src="assets/features_importance.png" width="700" alt="Feature importance"/>
   <p><em>Top features — importance moyenne sur les 10 modèles</em></p>
 </div>
 
@@ -163,11 +163,6 @@ Les features les plus discriminantes et ce qu'elles signifient concrètement :
 - **`payload_bytes_std`** — écart-type des tailles de paquets. Faible = tous les paquets font la même taille = comportement de machine
 - **`rst_flag_counts`** — flag RST = coupure soudaine de connexion TCP. Normal = rare, attaque = des centaines par seconde
 - **`dst_port`** — FTP-Patator cible systématiquement le port 21, SSH-Patator le port 22 → signal direct
-
-<div align="center">
-  <img src="data/feature_distributions.png" width="750" alt="Distribution des top features par classe"/>
-  <p><em>Distribution des top 6 features par classe d'attaque</em></p>
-</div>
 
 ---
 
@@ -187,7 +182,7 @@ Les features les plus discriminantes et ce qu'elles signifient concrètement :
 **Matrice de confusion :**
 
 <div align="center">
-  <img src="data/docs/confusion_matrix.png" width="650" alt="Matrice de confusion"/>
+  <img src="assets/confusion_matrix.png" width="650" alt="Matrice de confusion"/>
   <p><em>Matrice de confusion sur le test set (20% des données)</em></p>
 </div>
 
@@ -207,11 +202,6 @@ La diagonale quasi parfaite confirme que le modèle confond très peu les classe
 | DoS_GoldenEye | 95.87% | 99.68% | 92.34% | 130 |
 | DoS_Slowhttptest | 88.86% | 91.55% | 86.31% | 189 |
 | **DoS_Slowloris** | **84.14%** | 98.92% | 73.21% | **269** |
-
-<div align="center">
-  <img src="data/correlation_matrix.png" width="700" alt="Corrélation des features"/>
-  <p><em>Matrice de corrélation des features conservées</em></p>
-</div>
 
 ---
 
