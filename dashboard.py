@@ -216,6 +216,89 @@ def fig_features():
     return fig
 
 
+def fig_scatter(sel=None):
+    """Q5 : Où se situe chaque attaque sur le plan Precision / Recall ?"""
+    df = per_class.copy()
+    vol = label_counts.set_index("label")["count"]
+    df["volume"] = df["label"].map(vol).fillna(1000)
+    sizes = 10 + 50 * (df["volume"] / df["volume"].max())
+    colors = [CL if v >= 99 else CML if v >= 97 else CM if v >= 95 else CMH if v >= 93 else CH
+              for v in df["f1"]]
+    opacity = [1.0 if (not sel or sel == "ALL" or l == sel) else 0.15
+               for l in df["label"]]
+    fig = go.Figure()
+    # Zone verte idéale (precision ≥ 98 et recall ≥ 98)
+    fig.add_shape(type="rect", x0=98, x1=100.2, y0=98, y1=100.2,
+                  fillcolor="rgba(0,232,126,0.04)", line=dict(width=0))
+    fig.add_annotation(x=99.1, y=99.1, text="zone idéale", showarrow=False,
+                       font=dict(size=8, color=GR), opacity=0.5)
+    fig.add_trace(go.Scatter(
+        x=df["recall"], y=df["precision"],
+        mode="markers+text",
+        marker=dict(size=sizes, color=colors, opacity=opacity,
+                    line=dict(width=1, color="rgba(255,255,255,0.15)")),
+        text=df["label"], textposition="top center",
+        textfont=dict(size=8, color=TX),
+        customdata=df[["label","f1","precision","recall","fn","volume"]].values,
+        hovertemplate=(
+            "<b>%{customdata[0]}</b><br>"
+            "Recall : %{x:.2f}%  ·  Precision : %{y:.2f}%<br>"
+            "F1 : %{customdata[1]:.2f}%<br>"
+            "Faux négatifs : %{customdata[4]:,}<br>"
+            "Volume : %{customdata[5]:,} flows"
+            "<extra></extra>"
+        ),
+    ))
+    # Lignes de seuil
+    fig.add_hline(y=98, line=dict(color="rgba(255,51,85,0.3)", width=1, dash="dot"))
+    fig.add_vline(x=98, line=dict(color="rgba(255,51,85,0.3)", width=1, dash="dot"))
+    fig.update_layout(
+        **GL, margin=dict(l=40, r=20, t=10, b=40), height=340,
+        xaxis=dict(title="Recall (%)", showgrid=True, gridcolor="rgba(255,255,255,0.04)",
+                   ticksuffix="%", tickfont=dict(size=9), range=[70, 101]),
+        yaxis=dict(title="Precision (%)", showgrid=True, gridcolor="rgba(255,255,255,0.04)",
+                   ticksuffix="%", tickfont=dict(size=9), range=[88, 101]),
+    )
+    return fig
+
+
+def fig_radar(sel=None):
+    """Radar F1 / Precision / Recall pour une classe sélectionnée"""
+    if not sel or sel == "ALL":
+        row = per_class.mean(numeric_only=True)
+        title_label = "Moyenne toutes classes"
+    else:
+        matches = per_class[per_class["label"] == sel]
+        if matches.empty:
+            row = per_class.mean(numeric_only=True)
+            title_label = "Moyenne"
+        else:
+            row = matches.iloc[0]
+            title_label = sel
+    cats = ["F1", "Precision", "Recall", "F1"]
+    vals = [row["f1"], row["precision"], row["recall"], row["f1"]]
+    fig = go.Figure(go.Scatterpolar(
+        r=vals, theta=cats, fill="toself",
+        fillcolor="rgba(0,212,255,0.08)",
+        line=dict(color=A, width=2),
+        hovertemplate="%{theta} : %{r:.2f}%<extra></extra>",
+    ))
+    fig.update_layout(
+        **GL, margin=dict(l=20, r=20, t=30, b=10), height=260,
+        polar=dict(
+            bgcolor="rgba(0,0,0,0)",
+            radialaxis=dict(visible=True, range=[max(70, min(vals)-5), 101],
+                            tickfont=dict(size=7), gridcolor="rgba(255,255,255,0.06)",
+                            ticksuffix="%"),
+            angularaxis=dict(tickfont=dict(size=10, color=TX),
+                             gridcolor="rgba(255,255,255,0.06)"),
+        ),
+        annotations=[dict(text=title_label, x=0.5, y=1.08, xref="paper", yref="paper",
+                          showarrow=False, font=dict(size=10, color=A))],
+    )
+    return fig
+
+
 # ═══════════════════════════════════════════════════════════════════════
 # TABLE DRILL-DOWN
 # ═══════════════════════════════════════════════════════════════════════
@@ -392,10 +475,12 @@ def card(title, question, *children):
 
 
 # ── Figures initiales ────────────────────────────────────────────────
-FIG_VOL  = fig_volume()
-FIG_F1   = fig_f1(metric="f1")
-FIG_CONF = fig_confusion()
-FIG_FEAT = fig_features()
+FIG_VOL     = fig_volume()
+FIG_F1      = fig_f1(metric="f1")
+FIG_CONF    = fig_confusion()
+FIG_FEAT    = fig_features()
+FIG_SCATTER = fig_scatter()
+FIG_RADAR   = fig_radar()
 
 # ── KPI worst class ──────────────────────────────────────────────────
 worst_label = WORST["label"] if WORST is not None else "—"
@@ -461,8 +546,9 @@ app.layout = html.Div([
                 {"label": "Recall",    "value": "recall"},
             ],
             value="f1", inline=True,
-            style={"fontSize":"11px","color":TX,"gap":"14px","display":"flex"},
+            style={"fontSize":"11px","color":"#ffffff","gap":"14px","display":"flex"},
             inputStyle={"marginRight":"4px"},
+            labelStyle={"color":"#ffffff"},
         ),
     ], className="filter-bar"),
 
@@ -482,6 +568,16 @@ app.layout = html.Div([
                        config={"displayModeBar": False})),
         card("Feature Importance", "Sur quels signaux repose la détection ?",
              dcc.Graph(id="g-feat", figure=FIG_FEAT,
+                       config={"displayModeBar": False})),
+    ], className="grid-2"),
+
+    # LIGNE 3 : Scatter P/R + Radar
+    html.Div([
+        card("Precision vs Recall", "Quelle attaque est la plus difficile à détecter ?",
+             dcc.Graph(id="g-scatter", figure=FIG_SCATTER,
+                       config={"displayModeBar": False})),
+        card("Profil de détection", "Équilibre F1 / Precision / Recall par classe",
+             dcc.Graph(id="g-radar", figure=FIG_RADAR,
                        config={"displayModeBar": False})),
     ], className="grid-2"),
 
@@ -509,16 +605,38 @@ def clock(_):
 
 
 @app.callback(
-    Output("g-vol",    "figure"),
-    Output("g-f1",     "figure"),
-    Output("sel-badge","children"),
-    Output("tbl",      "children"),
-    Input("sel",       "value"),
-    Input("metric-sel","value"),
+    Output("sel", "value"),
+    Input("g-vol", "clickData"),
+    Input("g-scatter", "clickData"),
+    prevent_initial_call=True,
+)
+def click_select(click_vol, click_scatter):
+    """Clic sur une barre du volume ou une bulle du scatter → met à jour le filtre"""
+    from dash import ctx
+    triggered = ctx.triggered_id
+    if triggered == "g-vol" and click_vol:
+        label = click_vol["points"][0]["customdata"][0]
+        return label
+    if triggered == "g-scatter" and click_scatter:
+        label = click_scatter["points"][0]["customdata"][0]
+        return label
+    return "ALL"
+
+
+@app.callback(
+    Output("g-vol",     "figure"),
+    Output("g-f1",      "figure"),
+    Output("g-scatter", "figure"),
+    Output("g-radar",   "figure"),
+    Output("sel-badge", "children"),
+    Output("tbl",       "children"),
+    Input("sel",        "value"),
+    Input("metric-sel", "value"),
 )
 def apply_filter(sel, metric):
     badge = f"● {sel}" if sel and sel != "ALL" else ""
-    return fig_volume(sel), fig_f1(sel, metric=metric), badge, make_table(sel)
+    return (fig_volume(sel), fig_f1(sel, metric=metric),
+            fig_scatter(sel), fig_radar(sel), badge, make_table(sel))
 
 
 
