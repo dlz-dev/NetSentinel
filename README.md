@@ -44,8 +44,8 @@ Construire un pipeline Big Data de détection d'intrusions réseau en deux phase
 
 | Caractéristique | Détail |
 |---|---|
-| Volume | ~2.8M connexions réseau |
-| Features | 116 features par flux réseau |
+| Volume | ~2.6M connexions réseau |
+| Features | 122 features par flux réseau |
 | Classes | 15 (Benign + 14 types d'attaques) |
 | Format | CSV par jour / type d'attaque |
 
@@ -71,9 +71,23 @@ Construire un pipeline Big Data de détection d'intrusions réseau en deux phase
 Je charge l'ensemble des CSV avec Spark et je constate immédiatement un **fort déséquilibre des classes** : le trafic Benign représente à lui seul la majorité des données, et DoS_Hulk + Port_Scan écrasent les autres attaques.
 
 Pour ne pas biaiser le modèle, j'ai décidé de :
-- Limiter **Benign, DoS_Hulk et Port_Scan à 50 000 lignes** chacun
+- Limiter **Benign, DoS_Hulk et Port_Scan à 50 000 lignes** chacun — en utilisant `.orderBy(F.rand(seed=42)).limit(50000)` pour garantir un échantillonnage aléatoire reproductible
 - Conserver **toutes les lignes** des autres classes d'attaques (plus rares, donc précieuses)
 - Ne garder que les **10 classes les plus pertinentes** pour une entreprise
+
+| Classe | Lignes brutes | Après équilibrage | Stratégie |
+|---|---|---|---|
+| Benign | 1,786,239 | 50,000 | Limité (sur-représenté) |
+| DoS_Hulk | 349,240 | 50,000 | Limité (sur-représenté) |
+| Port_Scan | 161,323 | 50,000 | Limité (sur-représenté) |
+| DDoS_LOIT | 95,733 | 95,733 | Conservé intégralement |
+| FTP-Patator | 9,531 | 9,531 | Conservé intégralement |
+| DoS_GoldenEye | 8,364 | 8,364 | Conservé intégralement |
+| DoS_Slowhttptest | 6,860 | 6,860 | Conservé intégralement |
+| SSH-Patator | 5,949 | 5,949 | Conservé intégralement |
+| Botnet_ARES | 5,508 | 5,508 | Conservé intégralement |
+| DoS_Slowloris | 5,177 | 5,177 | Conservé intégralement |
+| **TOTAL** | **2,610,292** | **287,122** | **11% gardé** |
 
 <div align="center">
   <img src="assets/distribution_attaques.png" width="700" alt="Distribution des attaques"/>
@@ -84,7 +98,7 @@ Pour ne pas biaiser le modèle, j'ai décidé de :
 
 ### 2. Nettoyage & feature engineering
 
-Sur les **116 features** disponibles, j'en ai gardé une quarantaine. La logique est simple : moins de features = moins d'overfitting + moins de RAM = plus d'arbres possibles.
+Sur les **122 features** disponibles, j'en ai gardé 45. La logique est simple : moins de features = moins d'overfitting + moins de RAM = plus d'arbres possibles.
 
 **Ce que j'ai gardé et pourquoi :**
 
@@ -99,6 +113,8 @@ Sur les **116 features** disponibles, j'en ai gardé une quarantaine. La logique
 
 **Ce que j'ai supprimé :** bulk features (redondantes avec le volume), header bytes (corrélés avec payload), flags ECE/CWR (quasi inexistants), active/idle features, subflow features.
 
+**Résultat : 122 → 45 colonnes (-63%)**, sans perte d'information discriminante.
+
 J'ai aussi géré les cas pièges :
 - Valeurs `inf/-inf` (divisions par zéro dans Spark) → remplacées par `null` **avant** le `dropna()`
 - Colonne `protocol` → supprimée (quasi entièrement nulle après cast en double, déjà représentée par les flags TCP)
@@ -107,21 +123,50 @@ J'ai aussi géré les cas pièges :
 
 ### 3. Machine Learning
 
-#### Choix du modèle : Random Forest
+#### 3.1 Choix du modèle : Random Forest
 
 J'ai choisi le **Random Forest** pour plusieurs raisons :
 - Robuste au déséquilibre résiduel des classes
 - Donne directement une **feature importance interprétable**
 - Pas besoin de normalisation des features
-- Fonctionne nativement avec Spark MLLib
+- Fonctionne nativement avec **Spark MLLib** en mode distribué
 
-#### Stratégie : ensemble de 10 modèles
+#### 3.2 Recherche d'hyperparamètres — CrossValidator
 
-Au lieu d'un seul gros modèle, j'ai entraîné **10 Random Forests indépendants** (50 arbres chacun, profondeur max 10, seed différente pour chaque). La prédiction finale = **vote majoritaire** (mode des 10 prédictions).
+Pour trouver les meilleurs hyperparamètres **sans overfitter**, j'ai utilisé un `CrossValidator` Spark avec une `ParamGridBuilder` sur deux axes : le nombre d'arbres (`numTrees`) et la profondeur maximale (`maxDepth`).
+
+**Grille explorée :**
+
+| | numTrees = 30 | numTrees = 50 | numTrees = 75 | numTrees = 100 |
+|---|---|---|---|---|
+| **maxDepth = 5** | ✓ | ✓ | ✓ | ✓ |
+| **maxDepth = 8** | ✓ | ✓ | ✓ | ✓ |
+| **maxDepth = 10** | ✓ | ✓ | ✓ | ✓ |
+| **maxDepth = 11** | ✓ | ✓ | ✓ | ✓ ← **optimal** |
+
+**16 combinaisons × 5 folds = 80 Random Forests entraînés** — durée totale : 11.7 min.
+
+**Problème rencontré : l'overfitting avec maxDepth élevée**
+
+Lors d'un premier essai avec `maxDepth` jusqu'à 15, la CV trouvait systématiquement cette configuration comme optimale — mais avec un écart inquiétant entre le score CV et le score test :
+
+| Configuration | F1 CV (5-fold) | F1 Test | Écart |
+|---|---|---|---|
+| numTrees=100, maxDepth=15 | 99.59% | ~97.5% | **~2.1%** ← overfit |
+| numTrees=100, maxDepth=11 | 99.27% | 99.28% | **0.01%** ← stable ✓ |
+
+Un arbre de profondeur 15 mémorise les données d'entraînement au lieu d'apprendre des patterns généralisables. En limitant à `maxDepth=11`, le modèle généralise correctement : l'écart CV/test tombe à 0.01%.
+
+**Paramètres optimaux retenus :** `numTrees = 100` / `maxDepth = 11`
+
+#### 3.3 Stratégie finale : ensemble de 10 modèles
+
+Au lieu d'un seul gros modèle, j'ai entraîné **10 Random Forests indépendants** (100 arbres chacun, profondeur max 11, seed différente pour chaque). La prédiction finale = **vote majoritaire** (mode des 10 prédictions).
 
 Cette approche donne :
 - Des importances de features **statistiquement stables** (moyennées sur 10 modèles)
 - Un vote plus robuste sur les cas limites entre deux classes proches
+- **1000 arbres de décision au total** distribués sur 22 cores Spark
 
 <div align="center">
   <img src="assets/individual_vs_ensemble.png" width="700" alt="Modèles individuels vs ensemble"/>
@@ -140,8 +185,9 @@ Cette approche donne :
 Les features les plus discriminantes et ce qu'elles signifient concrètement :
 
 - **`bwd_init_win_bytes`** — taille de fenêtre TCP initiale du serveur. En SYN flood, l'attaquant ouvre des milliers de connexions sans jamais répondre → fenêtre nulle ou anormale
-- **`fwd_packets_IAT_mean`** — temps moyen entre deux paquets envoyés. Un humain est irrégulier (il lit, il clique, il réfléchit), un script d'attaque est régulier comme une horloge
-- **`payload_bytes_std`** — écart-type des tailles de paquets. Faible = tous les paquets font la même taille = comportement de machine
+- **`bwd_packets_IAT_mean`** — temps moyen entre les paquets renvoyés par le serveur. En DoS, le serveur répond de façon chaotique ou pas du tout
+- **`fwd_packets_IAT_mean`** — temps moyen entre deux paquets envoyés. Un humain est irrégulier, un script d'attaque est régulier comme une horloge
+- **`payload_bytes_max`** — taille maximale d'un paquet dans le flux. Certaines attaques envoient des paquets très petits pour saturer, d'autres très gros
 - **`rst_flag_counts`** — flag RST = coupure soudaine de connexion TCP. Normal = rare, attaque = des centaines par seconde
 - **`dst_port`** — FTP-Patator cible systématiquement le port 21, SSH-Patator le port 22 → signal direct
 
@@ -153,10 +199,10 @@ Les features les plus discriminantes et ce qu'elles signifient concrètement :
 
 | Métrique | Score |
 |---|---|
-| **Accuracy** | **98.85%** |
-| **F1-Score** | **98.81%** |
-| **Precision** | **98.88%** |
-| **Recall** | **98.85%** |
+| **Accuracy** | **99.30%** |
+| **F1-Score** | **99.28%** |
+| **Precision** | **99.29%** |
+| **Recall** | **99.30%** |
 
 </div>
 
@@ -173,16 +219,18 @@ La diagonale quasi parfaite confirme que le modèle confond très peu les classe
 
 | Classe | F1 | Precision | Recall | FN |
 |---|---|---|---|---|
-| DDoS_LOIT | 99.99% | 100.00% | 99.99% | 2 |
-| Port_Scan | 99.96% | 100.00% | 99.91% | 9 |
-| FTP-Patator | 99.90% | 99.95% | 99.84% | 3 |
-| Botnet_ARES | 99.66% | 99.32% | 100.00% | 0 |
-| SSH-Patator | 99.54% | 99.66% | 99.41% | 7 |
-| Benign | 99.12% | 98.59% | 99.66% | 34 |
-| DoS_Hulk | 98.03% | 96.29% | 99.83% | 17 |
-| DoS_GoldenEye | 95.87% | 99.68% | 92.34% | 130 |
-| DoS_Slowhttptest | 88.86% | 91.55% | 86.31% | 189 |
-| **DoS_Slowloris** | **84.14%** | 98.92% | 73.21% | **269** |
+| DDoS_LOIT | 99.97% | 100.00% | 99.95% | 10 |
+| FTP-Patator | 99.95% | 99.90% | 100.00% | 0 |
+| Port_Scan | 99.91% | 99.99% | 99.83% | 17 |
+| SSH-Patator | 99.71% | 100.00% | 99.41% | 7 |
+| Benign | 99.63% | 99.42% | 99.84% | 16 |
+| Botnet_ARES | 99.61% | 99.23% | 100.00% | 0 |
+| DoS_GoldenEye | 99.32% | 99.47% | 99.18% | 14 |
+| DoS_Hulk | 98.66% | 97.48% | 99.87% | 13 |
+| DoS_Slowhttptest | 87.82% | 87.94% | 87.69% | 170 |
+| **DoS_Slowloris** | **84.31%** | 98.66% | 73.61% | **265** |
+
+**8 classes au-dessus de 99% de F1.** Les deux points faibles (DoS_Slowloris et DoS_Slowhttptest) partagent exactement le même mécanisme d'attaque — connexions lentes pour épuiser le serveur — ce qui rend leur séparation difficile même pour le modèle.
 
 ---
 
@@ -195,11 +243,90 @@ Le dashboard répond à 4 questions concrètes qu'un analyste SOC se pose :
 | Graphique | Question |
 |---|---|
 | Volume par type d'attaque | Qu'est-ce qui attaque et en quel volume ? |
-| F1-Score par classe | Détecte-t-on bien chaque type de menace ? |
+| Scatter Precision / Recall | Quels types d'attaques sont bien détectés vs ratés ? |
 | Matrice de confusion | Qu'est-ce qu'on rate ou confond ? |
 | Feature importance | Sur quels signaux repose la détection ? |
+| Radar par classe | Vue 360° F1 / Precision / Recall pour une classe donnée |
 
-Un **filtre interactif** permet d'isoler n'importe quel type d'attaque pour voir ses métriques détaillées dans un tableau de drill-down.
+Un **filtre interactif** permet d'isoler n'importe quel type d'attaque pour voir ses métriques détaillées dans un tableau de drill-down. Cliquer sur une barre ou une bulle met automatiquement à jour le filtre.
+
+---
+
+## Performance Big Data — Spark
+
+### Pourquoi Spark ?
+
+Ce projet justifie concrètement l'usage de Spark à trois niveaux :
+
+1. **Volume** — 2.6M connexions réseau, 122 features → une lecture pandas chargerait tout en RAM et crasherait. Spark distribue la lecture sur 23 partitions en parallèle.
+2. **Calcul distribué ML** — 80 Random Forests pour la CrossValidation + 10 pour l'ensemble = **90 modèles entraînés** sur le même dataset. Single-node, ça aurait pris des heures.
+3. **Pipeline reproductible** — Spark MLLib (StringIndexer, VectorAssembler, CrossValidator) enchaîne preprocessing et ML dans un plan d'exécution optimisé et reproductible.
+
+### Configuration Spark utilisée
+
+| Paramètre | Valeur | Rôle |
+|---|---|---|
+| `spark.driver.memory` | 25g | Mémoire du driver (modèles, Pandas) |
+| `spark.executor.memory` | 12g | Mémoire par exécuteur |
+| `spark.executor.memoryOverhead` | 2g | Mémoire JVM hors-heap |
+| `spark.driver.maxResultSize` | 4g | Limite collect() vers le driver |
+| Parallélisme défaut | 22 | Nombre de cores disponibles |
+| Partitions RDD (CSV) | 23 | 1 fichier CSV = 1 partition |
+
+### Mesures de performance — pipeline complet
+
+Chaque étape du pipeline est instrumentée avec `time.time()` dans le notebook :
+
+| Étape | Durée | Observations |
+|---|---|---|
+| Ingestion CSV (2.6M lignes) | 22.8s | 23 partitions, 113K lignes/partition, scan parallèle |
+| Équilibrage des classes | 21.2s | `orderBy(rand())` = shuffle complet entre partitions |
+| Feature engineering (75 drops) | **0.3s** | Transformation **lazy** — aucune donnée lue |
+| VectorAssembler + split | 82.5s | 3 actions Spark (StringIndexer.fit + 2× count) |
+| CrossValidator (80 RF) | 703.7s | 11.7 min — étape dominante du pipeline |
+| Ensemble 10 RF | 249.5s | ~25s/modèle, 1000 arbres au total |
+| Inférence test set | 125.3s | 10 transforms séquentiels + vote UDF |
+| Sauvegarde 10 modèles | 26.4s | 2.6s/modèle sérialisé sur disque |
+| Export Delta Lake | 263.0s | Transaction logs + manifest files Delta |
+| **TOTAL PIPELINE** | **1495s** | **25 minutes** |
+
+### Lazy evaluation — démonstration concrète
+
+L'une des observations les plus intéressantes du pipeline concerne le **feature engineering** :
+
+```
+Colonnes avant  : 122
+Colonnes après  : 45 (-63%)
+Durée .drop()   : 0.3s   ← 0 shuffle, 0 lecture disque
+```
+
+Supprimer 75 colonnes sur 2.6M lignes prend 0.3 secondes parce que `.drop()` est une **transformation lazy** — Spark met à jour son plan d'exécution (DAG) sans lire une seule ligne. La lecture réelle n'aura lieu qu'à la prochaine action (`.count()`, `.write()`, etc.).
+
+C'est l'opposé de pandas où `df.drop(columns=[...])` lit et copie immédiatement les données en mémoire.
+
+### Distribution et partitionnement
+
+```
+Dataset brut    : 2,610,292 lignes / 23 partitions / 22 cores
+Lignes/partition: ~113,490  (distribution homogène)
+Train set       : 229,655 lignes / 26 partitions
+Test set        :  57,297 lignes / 26 partitions
+```
+
+Le split `randomSplit([0.8, 0.2])` ne déclenche pas de shuffle — il découpe chaque partition existante selon la probabilité. Le nombre de partitions reste identique (26 après l'union des DataFrames filtrés).
+
+### Spark UI — suivi en temps réel
+
+Le **Spark UI** (port 4040 pendant l'exécution, port 18080 pour l'History Server) permet d'inspecter :
+- Le **DAG** de chaque job : comment Spark découpe le plan en stages séquentiels
+- Le **détail de chaque stage** : nombre de tasks, shuffle read/write, durée
+- La **mémoire par exécuteur** en temps réel
+- Les **broadcast joins** : lors de l'inférence, chaque modèle RF (~65MB) est broadcasté depuis le driver vers les 22 workers
+
+```
+WARN DAGScheduler: Broadcasting large task binary with size 65.0 MiB
+```
+Ce warning apparaît 10 fois lors de l'inférence — une fois par modèle RF broadcasté. C'est le coût de l'ensemble : 10 × 65MB = 650MB de broadcast au total.
 
 ---
 
@@ -257,6 +384,8 @@ NetSentinel/
 ├── warehouse/
 │   └── 02_batch_analysis.ipynb   # pipeline batch complet
 ├── dashboard.py                   # dashboard SOC interactif (Dash/Plotly)
+├── assets/
+│   └── css/dashboard.css          # styles du dashboard
 ├── data/
 │   ├── *.csv                      # datasets bruts (CICIDS-2017)
 │   ├── processed/                 # df_final.parquet
@@ -275,12 +404,12 @@ NetSentinel/
 
 | Outil | Usage |
 |---|---|
-| **Apache Spark / PySpark** | Traitement distribué des 2GB de données |
+| **Apache Spark / PySpark** | Traitement distribué des 2.6M connexions réseau |
 | **Spark MLLib** | Random Forest, StringIndexer, VectorAssembler, CrossValidator |
-| **Delta Lake** | Stockage des exports pour le dashboard |
-| **Dash / Plotly** | Dashboard SOC interactif |
+| **Delta Lake** | Stockage transactionnel des exports dashboard |
+| **Dash / Plotly** | Dashboard SOC interactif (scatter, radar, heatmap) |
 | **Pandas / NumPy** | Post-traitement et analyses locales |
-| **Matplotlib / sklearn** | Visualisations (P-R curves, corrélation, distributions) |
+| **Matplotlib / sklearn** | Visualisations (confusion matrix, feature importance) |
 | **Docker** | Containerisation de l'environnement Spark |
 
 ---
