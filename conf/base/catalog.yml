@@ -1,0 +1,46 @@
+raw_traffic:
+  type: spark.SparkDatasetV2
+  filepath: data/01_raw/
+  file_format: csv
+  load_args:
+    header: True
+    inferSchema: True
+
+balanced_traffic:
+  type: spark.SparkDatasetV2
+  filepath: data/02_intermediate/balanced_traffic.parquet
+  file_format: parquet
+  save_args:
+    mode: overwrite
+
+model_input:
+  type: spark.SparkDatasetV2
+  filepath: data/03_primary/model_input.parquet
+  file_format: parquet
+  save_args:
+    mode: overwrite
+
+train_set:
+  type: spark.SparkDatasetV2
+  filepath: data/05_model_input/train.parquet
+  file_format: parquet
+  save_args:
+    mode: overwrite
+
+test_set:
+  type: spark.SparkDatasetV2
+  filepath: data/05_model_input/test.parquet
+  file_format: parquet
+  save_args:
+    mode: overwrite
+
+metrics:
+  type: json.JSONDataset
+  filepath: data/07_model_output/metrics.json
+
+dashboard_export:
+  type: spark.SparkDatasetV2
+  filepath: data/08_reporting/dashboard_export
+  file_format: delta
+  save_args:
+    mode: overwrite
