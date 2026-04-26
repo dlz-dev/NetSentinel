@@ -2,6 +2,7 @@ import logging
 import mlflow
 import mlflow.data
 import mlflow.spark
+from mlflow.tracking import MlflowClient
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
 from pyspark.ml.feature import StringIndexer, VectorAssembler
@@ -75,6 +76,22 @@ def train_cross_validator(train_set: DataFrame, parameters: dict) -> object:
     best = cv_model.bestModel
     best_f1 = max(cv_model.avgMetrics)
     logger.info(f"CV terminé — F1={best_f1:.4f}, numTrees={best.getNumTrees}, maxDepth={best.getOrDefault('maxDepth')}")
+
+    # j'enregistre le meilleur modèle dans le Model Registry MLflow
+    # le registry permet de gérer le cycle de vie : Staging → Production → Archived
+    run_id = mlflow.active_run().info.run_id
+    model_uri = f"runs:/{run_id}/best_cv_model"
+    mlflow.spark.log_model(cv_model.bestModel, artifact_path="best_cv_model")
+    registered = mlflow.register_model(model_uri=model_uri, name="netsentinel-ids")
+
+    # je passe le modèle en Staging — prêt à être validé avant mise en production
+    client = MlflowClient()
+    client.transition_model_version_stage(
+        name="netsentinel-ids",
+        version=registered.version,
+        stage="Staging",
+    )
+    logger.info(f"Modèle enregistré dans le registry — version {registered.version} en Staging")
     return cv_model
 
 
