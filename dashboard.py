@@ -1,9 +1,133 @@
+import re
 import numpy as np
 import pandas as pd
 import plotly.graph_objects as go
 import dash
-from dash import dcc, html, Input, Output
+from dash import dcc, html, Input, Output, State
 from datetime import datetime
+import yaml
+from src.netsentinel.agent.threat_analyzer import analyze_threat, generate_soc_report, chat_soc
+
+with open("conf/local/credentials.yml") as f:
+    _creds = yaml.safe_load(f)
+ANTHROPIC_KEY = _creds["anthropic"]["api_key"]
+LANGSMITH_KEY = _creds["langsmith"]["api_key"]
+
+# ═══════════════════════════════════════════════════════════════════════
+# PDF HELPERS
+# ═══════════════════════════════════════════════════════════════════════
+def _strip_md(text: str) -> str:
+    text = re.sub(r'\*\*(.*?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.*?)\*', r'\1', text)
+    text = re.sub(r'`(.*?)`', r'\1', text)
+    # Drop emojis and any char outside latin-1 (instead of replacing with ?)
+    return text.encode('latin-1', errors='ignore').decode('latin-1')
+
+
+def _make_pdf(md_text: str) -> bytes:
+    from fpdf import FPDF
+    pdf = FPDF()
+    pdf.set_auto_page_break(auto=True, margin=20)
+    pdf.add_page()
+    pdf.set_margins(20, 20, 20)
+    W = pdf.epw  # effective page width, recalculated after margins
+
+    def mc(h, txt, style="", size=10, color=(194, 204, 224)):
+        pdf.set_font("Helvetica", style, size)
+        pdf.set_text_color(*color)
+        pdf.set_x(pdf.l_margin)
+        pdf.multi_cell(W, h, txt)
+
+    # En-tête
+    mc(14, "NetSentinel - Rapport SOC Executif", "B", 18, (0, 212, 255))
+    mc(6, f"Genere le {datetime.now().strftime('%d/%m/%Y a %H:%M')}", "", 9, (104, 117, 149))
+    pdf.set_draw_color(0, 212, 255)
+    pdf.set_line_width(0.5)
+    pdf.ln(3)
+    pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
+    pdf.ln(8)
+
+    lines = md_text.split("\n")
+    i = 0
+    while i < len(lines):
+        s = lines[i].strip()
+
+        # Ligne vide
+        if not s:
+            pdf.ln(3)
+
+        # Séparateur --- → trait horizontal
+        elif re.match(r'^-{3,}$', s):
+            pdf.ln(2)
+            pdf.set_draw_color(104, 117, 149)
+            pdf.set_line_width(0.3)
+            pdf.set_x(pdf.l_margin)
+            pdf.line(pdf.l_margin, pdf.get_y(), pdf.l_margin + W, pdf.get_y())
+            pdf.ln(4)
+
+        # Titre ### (niveau 3)
+        elif s.startswith("### "):
+            pdf.ln(2)
+            mc(7, _strip_md(s[4:]), "B", 11, (255, 165, 0))
+            pdf.ln(1)
+
+        # Titre ## (niveau 2)
+        elif s.startswith("## "):
+            pdf.ln(3)
+            mc(8, _strip_md(s[3:]), "B", 13, (0, 212, 255))
+            pdf.ln(1)
+
+        # Titre # (niveau 1)
+        elif s.startswith("# "):
+            pdf.ln(3)
+            mc(9, _strip_md(s[2:]), "B", 14, (0, 212, 255))
+            pdf.ln(2)
+
+        # Tableau Markdown — collecte toutes les lignes du bloc
+        elif s.startswith("|"):
+            table_rows = []
+            while i < len(lines) and lines[i].strip().startswith("|"):
+                row = lines[i].strip()
+                # Ignore les lignes séparateurs |---|---|
+                if not re.match(r'^\|[\s\-|:]+\|$', row):
+                    cells = [c.strip() for c in row.split("|")]
+                    cells = [c for c in cells if c]  # retire les vides aux bords
+                    if cells:
+                        table_rows.append(cells)
+                i += 1
+            if table_rows:
+                col_w = W / max(len(r) for r in table_rows)
+                for row_idx, cells in enumerate(table_rows):
+                    pdf.set_x(pdf.l_margin)
+                    is_header = (row_idx == 0)
+                    pdf.set_font("Helvetica", "B" if is_header else "", 9)
+                    pdf.set_text_color(*(0, 212, 255) if is_header else (194, 204, 224))
+                    for cell in cells:
+                        pdf.cell(col_w, 6, _strip_md(cell)[:30], border=0)
+                    pdf.ln()
+                pdf.ln(2)
+            continue  # i déjà avancé dans la boucle interne
+
+        # Ligne **bold** entière
+        elif s.startswith("**") and s.endswith("**") and len(s) > 4:
+            mc(7, _strip_md(s[2:-2]), "B", 11, (255, 165, 0))
+
+        # Bullet - ou *
+        elif s.startswith("- ") or (s.startswith("* ") and not s.startswith("**")):
+            mc(6, "  *  " + _strip_md(s[2:]), "", 10, (194, 204, 224))
+
+        # Ligne numérotée 1. 2) etc.
+        elif len(s) > 1 and s[0].isdigit() and s[1] in ".)":
+            mc(7, _strip_md(s), "B", 10, (255, 165, 0))
+
+        # Texte normal
+        else:
+            mc(6, _strip_md(s), "", 10, (194, 204, 224))
+
+        i += 1
+
+    return bytes(pdf.output())
+
 
 # ═══════════════════════════════════════════════════════════════════════
 # DATA LOADING
@@ -444,6 +568,50 @@ app.layout = html.Div([
         ),
     ], className="filter-bar"),
 
+    # BARRE IA — compacte, en haut, avec tous les boutons IA
+    dcc.Store(id="chat-open", data=False),
+    html.Div([
+        html.Div([
+            html.Div([
+                html.Span("◈ Intelligence IA — Claude"),
+                html.Span("Analyse menace · Rapport CISO · Chat libre", className="ns-card-q"),
+                # Boutons dans la ligne de titre
+                html.Div([
+                    html.Button("⚡ Analyser la menace", id="btn-analyze", style={
+                        "background": "rgba(0,212,255,0.1)",
+                        "border": "1px solid rgba(0,212,255,0.3)",
+                        "color": "#00d4ff", "padding": "6px 16px",
+                        "borderRadius": "6px", "cursor": "pointer", "fontSize": "11px",
+                    }),
+                    html.Button("📋 Rapport SOC", id="btn-soc-report", style={
+                        "background": "rgba(124,94,247,0.1)",
+                        "border": "1px solid rgba(124,94,247,0.3)",
+                        "color": "#7c5ef7", "padding": "6px 16px",
+                        "borderRadius": "6px", "cursor": "pointer", "fontSize": "11px",
+                    }),
+                    html.Button("📥 PDF", id="btn-pdf", style={
+                        "background": "rgba(255,165,0,0.1)",
+                        "border": "1px solid rgba(255,165,0,0.3)",
+                        "color": "#ffa500", "padding": "6px 16px",
+                        "borderRadius": "6px", "cursor": "pointer", "fontSize": "11px",
+                    }),
+                    dcc.Download(id="download-pdf"),
+                ], style={"display": "flex", "gap": "8px", "marginLeft": "auto"}),
+            ], className="ns-card-title", style={"display": "flex", "alignItems": "center", "gap": "12px"}),
+            dcc.Loading(
+                id="loading-ai",
+                type="circle",
+                color="#00d4ff",
+                children=dcc.Markdown(
+                    id="ai-output",
+                    style={"color": "#c2cce0", "fontSize": "12px",
+                           "lineHeight": "1.9", "fontFamily": "Inter, monospace",
+                           "marginTop": "4px"},
+                )
+            ),
+        ], className="ns-card"),
+    ], className="grid-full"),
+
     # GRAPHIQUES — 2 × 2
     html.Div([
         card("Volume par type d'attaque", "Qu'est-ce qui attaque ?",
@@ -483,6 +651,76 @@ app.layout = html.Div([
             html.Div(id="tbl"),
         ], className="ns-card"),
     ], className="grid-full"),
+
+    # BOUTON CHAT FLOTTANT
+    html.Button("💬", id="btn-chat-toggle", style={
+        "position": "fixed", "bottom": "28px", "right": "28px",
+        "zIndex": "1000", "width": "54px", "height": "54px",
+        "borderRadius": "50%",
+        "background": "linear-gradient(135deg, rgba(0,232,126,0.15), rgba(0,212,255,0.15))",
+        "border": "1px solid rgba(0,232,126,0.35)",
+        "color": "#00e87e", "fontSize": "22px", "cursor": "pointer",
+        "boxShadow": "0 4px 24px rgba(0,232,126,0.18)",
+    }),
+
+    # PANNEAU CHAT LATÉRAL (fixe, droite)
+    html.Div([
+        html.Div([
+            html.Span("◈ Chat SOC", style={
+                "color": "#00e87e", "fontSize": "13px", "fontWeight": "600",
+                "fontFamily": "Inter, monospace",
+            }),
+            html.Button("✕", id="btn-chat-close", style={
+                "background": "none", "border": "none",
+                "color": "#687595", "fontSize": "18px", "cursor": "pointer",
+            }),
+        ], style={"display": "flex", "justifyContent": "space-between",
+                  "alignItems": "center", "marginBottom": "16px",
+                  "borderBottom": "1px solid rgba(0,232,126,0.15)",
+                  "paddingBottom": "12px"}),
+        # Zone de réponse (scrollable)
+        html.Div([
+            dcc.Loading(type="circle", color="#00e87e",
+                children=dcc.Markdown(id="chat-output", style={
+                    "color": "#c2cce0", "fontSize": "12px",
+                    "lineHeight": "1.8", "fontFamily": "Inter, monospace",
+                })
+            ),
+        ], style={"flex": "1", "overflowY": "auto", "marginBottom": "14px",
+                  "paddingRight": "4px"}),
+        # Zone input
+        html.Div([
+            dcc.Textarea(
+                id="chat-input",
+                placeholder="Ex : Pourquoi les FTP-Patator sont difficiles à détecter ?",
+                style={
+                    "width": "100%", "height": "80px", "resize": "none",
+                    "background": "rgba(255,255,255,0.04)",
+                    "border": "1px solid rgba(255,255,255,0.1)",
+                    "borderRadius": "6px", "color": "#c2cce0",
+                    "fontSize": "12px", "padding": "9px 12px",
+                    "fontFamily": "Inter, monospace", "outline": "none",
+                    "boxSizing": "border-box",
+                }
+            ),
+            html.Button("Envoyer →", id="btn-chat", style={
+                "marginTop": "8px", "width": "100%",
+                "background": "rgba(0,232,126,0.1)",
+                "border": "1px solid rgba(0,232,126,0.3)",
+                "color": "#00e87e", "padding": "8px",
+                "borderRadius": "6px", "cursor": "pointer", "fontSize": "11px",
+            }),
+        ]),
+    ], id="chat-panel", style={
+        "display": "none",
+        "position": "fixed", "top": "0", "right": "0",
+        "height": "100vh", "width": "380px",
+        "background": "#0c1525",
+        "borderLeft": "1px solid rgba(0,232,126,0.12)",
+        "zIndex": "999", "padding": "24px 18px",
+        "flexDirection": "column",
+        "boxShadow": "-8px 0 40px rgba(0,0,0,0.5)",
+    }),
 
 ], style={"backgroundColor": BG, "minHeight": "100vh"})
 
@@ -530,6 +768,94 @@ def apply_filter(sel, metric):
     return (fig_volume(sel), fig_f1(sel, metric=metric),
             fig_scatter(sel), fig_radar(sel), badge, make_table(sel))
 
+
+
+@app.callback(
+    Output("ai-output", "children"),
+    Input("btn-analyze", "n_clicks"),
+    Input("btn-soc-report", "n_clicks"),
+    State("sel", "value"),
+    prevent_initial_call=True,
+)
+def ai_action(_n_analyze, _n_report, sel):
+    from dash import ctx
+    if ctx.triggered_id == "btn-analyze":
+        if not sel or sel == "ALL":
+            return "Sélectionne un type d'attaque dans le filtre puis clique sur Analyser."
+        row = per_class[per_class["label"] == sel]
+        if row.empty:
+            return "Données non disponibles pour cette classe."
+        r = row.iloc[0]
+        return analyze_threat(
+            attack_type=sel, f1=r["f1"], precision=r["precision"],
+            recall=r["recall"], fn=int(r["fn"]),
+            anthropic_api_key=ANTHROPIC_KEY, langsmith_api_key=LANGSMITH_KEY,
+        )
+    if ctx.triggered_id == "btn-soc-report":
+        per_class_data = per_class[["label","f1","precision","recall","fn"]].to_dict("records")
+        return generate_soc_report(
+            metrics_dict=METRICS_DICT, per_class_data=per_class_data,
+            total_flows=TOTAL_FLOWS, total_attacks=TOTAL_ATTACKS,
+            anthropic_api_key=ANTHROPIC_KEY, langsmith_api_key=LANGSMITH_KEY,
+        )
+    return dash.no_update
+
+
+@app.callback(
+    Output("download-pdf", "data"),
+    Input("btn-pdf", "n_clicks"),
+    State("ai-output", "children"),
+    prevent_initial_call=True,
+)
+def download_pdf(n_clicks, report_content):
+    if not n_clicks or not report_content:
+        return dash.no_update
+    return dcc.send_bytes(_make_pdf(report_content), "rapport_soc_netsentinel.pdf")
+
+
+@app.callback(
+    Output("chat-panel", "style"),
+    Input("btn-chat-toggle", "n_clicks"),
+    Input("btn-chat-close", "n_clicks"),
+    State("chat-open", "data"),
+    prevent_initial_call=True,
+)
+def toggle_chat(n_open, n_close, is_open):
+    from dash import ctx
+    PANEL_BASE = {
+        "position": "fixed", "top": "0", "right": "0",
+        "height": "100vh", "width": "380px",
+        "background": "#0c1525",
+        "borderLeft": "1px solid rgba(0,232,126,0.12)",
+        "zIndex": "999", "padding": "24px 18px",
+        "flexDirection": "column",
+        "boxShadow": "-8px 0 40px rgba(0,0,0,0.5)",
+    }
+    if ctx.triggered_id == "btn-chat-close":
+        return {**PANEL_BASE, "display": "none"}
+    return {**PANEL_BASE, "display": "flex"}
+
+
+@app.callback(
+    Output("chat-output", "children"),
+    Input("btn-chat", "n_clicks"),
+    State("chat-input", "value"),
+    prevent_initial_call=True,
+)
+def chat(n_clicks, question):
+    if not n_clicks or not question:
+        return ""
+    context = {
+        "accuracy":      METRICS_DICT.get("Accuracy", 0),
+        "f1":            METRICS_DICT.get("F1-Score", 0),
+        "total_flows":   TOTAL_FLOWS,
+        "total_attacks": TOTAL_ATTACKS,
+        "attack_types":  ATTACK_TYPES,
+    }
+    return chat_soc(
+        question=question, context=context,
+        anthropic_api_key=ANTHROPIC_KEY, langsmith_api_key=LANGSMITH_KEY,
+    )
 
 
 if __name__ == "__main__":
