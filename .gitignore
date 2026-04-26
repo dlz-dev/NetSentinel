@@ -17,6 +17,9 @@ data/**
 # also keep all .gitkeep files
 !.gitkeep
 
+# keep DVC tracking files
+!data/*.dvc
+
 
 # ignore kedro-viz metadata
 .viz

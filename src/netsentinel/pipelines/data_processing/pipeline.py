@@ -1,10 +1,16 @@
 from kedro.pipeline import Node, Pipeline
 
-from .nodes import ingest_raw_traffic, balance_traffic, select_features
+from .nodes import run_dlt_ingestion, ingest_raw_traffic, balance_traffic, select_features
 
 
 def create_pipeline(**kwargs) -> Pipeline:
     return Pipeline([
+        Node(
+            func=run_dlt_ingestion,
+            inputs="params:data_processing",
+            outputs=None,
+            name="run_dlt_ingestion_node",
+        ),
         Node(
             func=ingest_raw_traffic,
             inputs="raw_traffic",

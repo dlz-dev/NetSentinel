@@ -9,3 +9,4 @@ seaborn~=0.12.1
 mlflow>=2.13.0
 delta-spark>=3.0.0
 pyspark>=3.3.0
+kedro-mlflow>=0.12.0

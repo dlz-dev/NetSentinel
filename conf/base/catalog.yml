@@ -1,6 +1,6 @@
 raw_traffic:
   type: spark.SparkDatasetV2
-  filepath: data/01_raw/
+  filepath: data/02_intermediate/raw_traffic
   file_format: csv
   load_args:
     header: True

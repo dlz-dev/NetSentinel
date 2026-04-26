@@ -1,5 +1,6 @@
 import logging
 import mlflow
+import mlflow.data
 import mlflow.spark
 from pyspark.ml.classification import RandomForestClassifier
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
@@ -57,6 +58,15 @@ def train_cross_validator(train_set: DataFrame, parameters: dict) -> object:
         numFolds=grid["n_folds"],
         seed=seed,
     )
+
+    # je logue le dataset d'entraînement dans MLflow pour savoir exactement sur quelles données
+    # ce modèle a été entraîné — utile si le modèle se dégrade en prod et qu'on veut comparer
+    dataset = mlflow.data.from_spark(
+        train_set,
+        source="data/05_model_input/train.parquet",
+        name="train_set"
+    )
+    mlflow.log_input(dataset, context="training")
 
     # j'active le logging automatique MLflow — il va enregistrer tous les paramètres et métriques sans que j'aie à le faire manuellement
     mlflow.pyspark.ml.autolog()

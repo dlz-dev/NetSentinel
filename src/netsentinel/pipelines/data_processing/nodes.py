@@ -1,6 +1,7 @@
 import logging
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
+from netsentinel.ingestion.dlt_pipeline import run_ingestion
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,15 @@ COLS_TO_DROP = [
     "bwd_packets_IAT_max", "bwd_packets_IAT_min", "bwd_packets_IAT_total",
     "fwd_fin_flag_counts", "fwd_psh_flag_counts", "fwd_urg_flag_counts",
 ]
+
+
+def run_dlt_ingestion(parameters: dict) -> None:
+    # je lance le pipeline dlt avant tout — il lit les CSV bruts et produit
+    # du Parquet propre dans data/02_intermediate/ que Kedro consommera ensuite
+    run_ingestion(
+        data_path=parameters["raw_data_path"],
+        destination_path="data/02_intermediate/raw_traffic",
+    )
 
 
 def ingest_raw_traffic(raw_traffic: DataFrame):
