@@ -158,6 +158,7 @@ venv.bak/
 
 # mlflow local runs
 mlruns/*
+mlflow.db
 
 # spark history server logs
 spark-logs/
