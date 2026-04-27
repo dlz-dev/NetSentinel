@@ -15,29 +15,30 @@ Mme Linda Wang
 2. Contexte et problématique
 3. Dataset
 4. Architecture du pipeline
-5. Phase Batch — Infrastructure Big Data avec Spark
-   - 5.1 Pourquoi Spark ? La contrainte de volume
-   - 5.2 Initialisation du cluster — SparkSession
-   - 5.3 Ingestion des données — spark.read.csv()
-   - 5.4 Équilibrage des classes — filter, orderBy, limit, union
-   - 5.5 Feature engineering — drop, cast, dropna
-   - 5.6 La lazy evaluation — le moteur derrière tout ça
-   - 5.7 Préparation ML — StringIndexer, VectorAssembler, randomSplit
-   - 5.8 Sauvegarde intermédiaire en Parquet
-   - 5.9 Configuration mémoire et tuning
-   - 5.10 Mesures de performance — pipeline instrumenté de bout en bout
-   - 5.11 Spark UI — observer le plan d'exécution en temps réel
-6. Phase Batch — Machine Learning distribué
-   - 6.1 Choix du modèle
-   - 6.2 Recherche d'hyperparamètres — CrossValidator
-   - 6.3 Stratégie d'ensemble
-   - 6.4 Feature importance
-   - 6.5 Évaluation
-7. Dashboard SOC
-8. Phase Streaming
-9. Analyse des limites
-10. Conclusion
-11. Références
+5. Stack MLOps — orchestration, versionnage et tracking
+6. Phase Batch — Infrastructure Big Data avec Spark
+   - 6.1 Pourquoi Spark ? La contrainte de volume
+   - 6.2 Initialisation du cluster — SparkSession
+   - 6.3 Ingestion des données — spark.read.csv()
+   - 6.4 Équilibrage des classes — filter, orderBy, limit, union
+   - 6.5 Feature engineering — drop, cast, dropna
+   - 6.6 La lazy evaluation — le moteur derrière tout ça
+   - 6.7 Préparation ML — StringIndexer, VectorAssembler, randomSplit
+   - 6.8 Sauvegarde intermédiaire en Parquet
+   - 6.9 Configuration mémoire et tuning
+   - 6.10 Mesures de performance — pipeline instrumenté de bout en bout
+   - 6.11 Spark UI — observer le plan d'exécution en temps réel
+7. Phase Batch — Machine Learning distribué
+   - 7.1 Choix du modèle
+   - 7.2 Recherche d'hyperparamètres — CrossValidator
+   - 7.3 Stratégie d'ensemble
+   - 7.4 Feature importance
+   - 7.5 Évaluation
+8. Dashboard SOC
+9. Phase Streaming
+10. Analyse des limites
+11. Conclusion
+12. Références
 
 ---
 
@@ -112,9 +113,118 @@ CSV bruts (2.6M lignes, 23 fichiers)
 
 ---
 
-## 5. Phase Batch — Infrastructure Big Data avec Spark
+## 5. Stack MLOps — orchestration, versionnage et tracking
 
-### 5.1 Pourquoi Spark ? La contrainte de volume
+Le pipeline décrit dans les sections suivantes existe en deux versions : une version notebook (le PoC initial) et une version production structurée avec une stack MLOps complète. Cette section décrit les outils ajoutés pour passer de l'un à l'autre, pourquoi je les ai choisis, et ce que ça change concrètement.
+
+---
+
+### 5.1 Kedro — orchestration du pipeline
+
+Sans orchestration, mon pipeline c'est un script `train.py` de 500 lignes qu'on lance manuellement. Impossible à relancer partiellement si quelque chose plante à mi-chemin, et si quelqu'un d'autre clone le repo il ne sait pas dans quel ordre lancer les fichiers.
+
+Kedro structure ça en **nodes** (fonctions Python pures) reliés par un **Data Catalog** (déclaration des sources et destinations en YAML). Le DAG est résolu automatiquement — Kedro sait dans quel ordre lancer chaque fonction selon ses dépendances d'entrée/sortie.
+
+```bash
+kedro run   # résout le DAG, lance les 9 nodes dans l'ordre
+```
+
+Le Data Catalog remplace tous les chemins hardcodés dans le code :
+
+```yaml
+# conf/base/catalog.yml — je déclare la donnée une fois
+clean_traffic:
+  type: spark.SparkDataset
+  filepath: data/03_primary/clean_traffic/
+  file_format: parquet
+```
+
+Mon code Python ne connaît plus les chemins de fichiers — Kedro injecte les données directement dans chaque fonction. Si je déplace les données, je change une ligne dans le YAML.
+
+```
+nodes.py    →  les fonctions   (le "quoi faire")
+pipeline.py →  l'ordre         (le "dans quel ordre")
+catalog.yml →  les données     (le "avec quoi")
+params.yml  →  les valeurs     (le "avec quelles valeurs")
+```
+
+---
+
+### 5.2 DVC — versionnage des données
+
+Git ne peut pas versionner des fichiers de plusieurs centaines de Mo. Sans DVC, les CSV sont soit commitées (le repo explose), soit ignorées (un collaborateur clone et n'a aucune donnée).
+
+DVC sépare les deux : Git stocke un fichier `.dvc` de quelques lignes (juste un hash), les vraies données sont sur **Google Drive**.
+
+```bash
+dvc push   # envoie les données sur Google Drive
+dvc pull   # récupère exactement la même version (autre machine ou collègue)
+```
+
+L'intérêt concret : dans 6 mois, je reviens à un ancien commit Git, je fais `dvc pull`, et je rejoue exactement le même entraînement sur exactement les mêmes données. C'est la reproductibilité réelle — pas juste le code, mais les données aussi.
+
+---
+
+### 5.3 dlt — couche d'ingestion avec validation de schéma
+
+`spark.read.csv()` directement dans le pipeline c'est fragile. Si une colonne change de nom dans un nouveau CSV → ça plante silencieusement dans Spark 2h plus tard, au milieu d'un entraînement.
+
+dlt (data load tool) joue le rôle de garde-barrière : il lit les CSV, valide le schéma automatiquement, et écrit du Parquet propre que Kedro consomme.
+
+```
+data/01_raw/*.csv  →  [dlt : validation + typage]  →  data/02_intermediate/  →  [Kedro/Spark]
+```
+
+Si un CSV a une colonne manquante ou un type incompatible → dlt plante immédiatement avec un message clair, au lieu que l'erreur remonte 20 minutes plus tard dans un stage Spark.
+
+---
+
+### 5.4 kedro-mlflow + MLflow — tracking automatique
+
+Sans tracking, après quelques runs je ne sais plus quel modèle a les meilleures métriques, avec quels hyperparamètres, sur quelles données. `kedro-mlflow` résout ça en connectant Kedro et MLflow automatiquement : chaque `kedro run` crée un run MLflow avec tous les paramètres YAML loggués sans une seule ligne de code supplémentaire.
+
+J'ai ajouté le **dataset tracking** dans le node d'entraînement — MLflow calcule un hash du dataset utilisé :
+
+```python
+dataset = mlflow.data.from_spark(train_set, path="data/05_model_input/train.parquet")
+mlflow.log_input(dataset, context="training")
+```
+
+Si dans 6 mois le modèle se dégrade, je compare le hash du dataset d'entraînement avec les nouvelles données et je vois immédiatement si les données ont changé.
+
+**Model Registry :** le meilleur modèle CV est automatiquement enregistré dans le registry `netsentinel-ids` et passé en `Staging` après chaque run. Le cycle de vie d'un modèle : `Staging → Production → Archived`. Pour charger le modèle depuis n'importe quelle machine :
+
+```python
+model = mlflow.spark.load_model("models:/netsentinel-ids/Production")
+```
+
+---
+
+### 5.5 LangChain + Claude + LangSmith — intelligence IA dans le dashboard
+
+Un dashboard de métriques montre des chiffres — il ne dit pas à l'analyste SOC ce que ça signifie ni quoi faire. J'ai intégré 3 fonctions IA dans le dashboard, toutes propulsées par **Claude Haiku** via LangChain :
+
+| Fonction | Déclencheur | Ce que Claude produit |
+|---|---|---|
+| `analyze_threat()` | Sélection d'une classe d'attaque | Explication de l'attaque, analyse des performances du modèle, risque des faux négatifs |
+| `generate_soc_report()` | Bouton "Rapport SOC" | Briefing CISO structuré : situation globale, menaces critiques, 3 recommandations. Exportable en PDF |
+| `chat_soc()` | Panneau flottant 💬 | Réponses en langage naturel à n'importe quelle question sur les données du dashboard |
+
+**LangSmith** trace chaque appel LLM automatiquement (prompt, réponse, tokens, latence) — c'est le MLflow des LLM. Si Claude répond incorrectement, je vois exactement quel prompt a produit quelle réponse et je peux optimiser.
+
+---
+
+### 5.6 Vue d'ensemble de la stack
+
+![Architecture Pipeline NetSentinel](assets/architecture_pipeline_netsentinel_png.png)
+
+`kedro run` déclenche tout en une commande. `mlflow ui` montre les runs, métriques et artefacts. `dvc pull` garantit qu'on travaille toujours sur les mêmes données.
+
+---
+
+## 6. Phase Batch — Infrastructure Big Data avec Spark
+
+### 6.1 Pourquoi Spark ? La contrainte de volume
 
 La première question à se poser avant de choisir Spark, c'est : est-ce que c'est vraiment nécessaire ? Dans ce projet, la réponse est clairement oui, pour trois raisons concrètes.
 
@@ -126,7 +236,7 @@ La première question à se poser avant de choisir Spark, c'est : est-ce que c'e
 
 ---
 
-### 5.2 Initialisation du cluster — SparkSession
+### 6.2 Initialisation du cluster — SparkSession
 
 ```python
 spark = SparkSession.builder
@@ -144,7 +254,7 @@ C'est aussi là qu'on fixe la configuration mémoire. Le **driver** reçoit 25g 
 
 ---
 
-### 5.3 Ingestion des données — spark.read.csv()
+### 6.3 Ingestion des données — spark.read.csv()
 
 ```python
 df = spark.read.csv("../data", header=True, inferSchema=True)
@@ -172,70 +282,37 @@ Une **partition** c'est simplement un morceau du DataFrame qui tient en mémoire
 
 ---
 
-### 5.4 Équilibrage des classes — filter, orderBy, limit, union
+### 6.4 Équilibrage des classes — filter, orderBy, limit, union
 
-Le dataset brut est fortement déséquilibré (Benign = 1.7M sur 2.6M lignes). J'ai donc filtré et limité les classes majoritaires. Voici ce que Spark fait à chaque opération :
+Le dataset brut est fortement déséquilibré (Benign = 1.7M sur 2.6M lignes). J'ai limité les classes majoritaires à 50 000 lignes chacune :
 
 ```python
 benign_df = df.filter(F.col("label") == "Benign").orderBy(F.rand(seed=42)).limit(50000)
-```
-
-**`.filter()`** — c'est une transformation **narrow** : chaque worker filtre sa propre partition indépendamment, sans communiquer avec les autres. Spark n'a pas besoin de déplacer des données entre les partitions pour savoir si une ligne vaut "Benign". Aucun shuffle, quasi gratuit. Spark enregistre juste cette transformation dans le plan.
-
-**`.orderBy(F.rand(seed=42))`** — ici ça change. Un tri global oblige Spark à comparer des lignes qui sont sur des partitions différentes. Il doit donc redistribuer les données entre les workers — c'est ce qu'on appelle un **shuffle**. Concrètement : chaque worker envoie ses données via le réseau (ou le disque en local) vers les workers responsables des plages de valeurs correspondantes. C'est l'opération la plus coûteuse en Spark parce qu'elle implique des I/O réseau. C'est pour ça que cette étape prend 21.2 secondes malgré que ça "ne semble" être qu'un tri.
-
-J'utilise `F.rand(seed=42)` plutôt qu'un simple `.limit()` parce qu'un `.limit()` seul prend les premières lignes dans l'ordre de lecture — ce qui introduit un biais temporel (toutes les connexions du lundi matin). Le `orderBy(rand())` garantit un échantillonnage vraiment aléatoire et reproductible grâce au seed fixé.
-
-**`.limit(50000)`** — transformation narrow, Spark arrête de lire dès qu'il a atteint 50 000 lignes dans chaque partition concernée.
-
-```python
 df_balanced = benign_df.union(dos_hulk_df).union(port_scan_df).union(attacks_df)
 ```
 
-**`.union()`** — transformation narrow aussi. Spark concatène simplement les plans d'exécution des quatre DataFrames sans bouger les données. Aucun shuffle. À ce stade, rien n'a encore été exécuté — on a juste empilé les instructions dans le DAG.
+Les opérations illustrent bien la différence entre transformations **narrow** et **wide** : `.filter()`, `.limit()` et `.union()` sont narrow (chaque partition travaille seule, pas de shuffle). `.orderBy()` est wide — il force un **shuffle** global pour trier les lignes entre partitions, d'où les 21.2 secondes malgré que ça "ne semble" être qu'un tri.
 
-```python
-counts_rows = df_balanced.groupBy("label").count().orderBy("count", ascending=False).collect()
-```
-
-**`.groupBy().count()`** — là c'est une transformation **wide** : pour compter les lignes par label, Spark doit regrouper toutes les lignes d'un même label ensemble, même si elles sont sur des partitions différentes. Ça nécessite un shuffle — chaque ligne doit être envoyée vers le worker responsable de son label. C'est une nouvelle "stage boundary" dans le DAG.
-
-**`.collect()`** — c'est une **action**. Ici Spark exécute enfin tout le plan accumulé depuis le début : lit les CSV, filtre, trie, limite, union, groupBy, count, et ramène les 10 résultats vers le driver. Avec `.collect()` sur un résultat de 10 lignes (une par classe), c'est instantané — j'évite aussi de déclencher deux actions séparées (`.show()` puis `.count()`) qui rerequeraient le scan complet deux fois.
+J'utilise `F.rand(seed=42)` plutôt qu'un simple `.limit()` pour éviter le biais temporel — un `.limit()` seul prendrait les premières connexions dans l'ordre de lecture (toutes du lundi matin).
 
 ---
 
-### 5.5 Feature engineering — drop, cast, dropna
+### 6.5 Feature engineering — drop, cast, dropna
+
+Toutes ces opérations sont des transformations **lazy** — Spark accumule les instructions sans calculer quoi que ce soit :
 
 ```python
-df_clean = df_balanced.drop(*cols_to_drop)
-```
-
-**`.drop()`** — transformation lazy. Spark va juste mettre à jour son plan d'exécution pour ignorer ces colonnes lors du prochain calcul. Il ne lit aucune donnée, ne déplace rien, ne fait aucun calcul. Résultat mesuré : **0.3 millisecondes** pour "supprimer" 75 colonnes sur 2.6M lignes. C'est le principe de la lazy evaluation en action — cette opération est fondamentalement gratuite.
-
-```python
-for col_name in string_to_double:
-    df_clean = df_clean.withColumn(col_name, F.col(col_name).cast("double"))
-```
-
-**`.withColumn()` avec `.cast()`** — transformations narrow, une par colonne. Spark va ajouter au plan "pour cette colonne, convertir le type". Toujours lazy, toujours gratuit à ce stade.
-
-```python
-for c in double_cols:
-    df_clean = df_clean.withColumn(c,
-        F.when(F.col(c) == float("inf"), None).when(F.col(c) == float("-inf"), None).otherwise(F.col(c)))
-```
-
-**`.when()`** — transformation narrow conditionnelle. Spark génère une expression qui sera évaluée à l'exécution pour remplacer les `inf/-inf` par `null`. Ces valeurs existent parce que Spark divise parfois par zéro dans certaines features calculées (bytes_rate sur une durée nulle par exemple), et au lieu de planter il génère `infinity`. MLLib ne sait pas gérer ces valeurs, donc il faut les remplacer avant.
-
-```python
+df_clean = df_balanced.drop(*cols_to_drop)                          # 0.3ms — gratuit
+df_clean = df_clean.withColumn(col, F.col(col).cast("double"))      # narrow, par colonne
+df_clean = df_clean.withColumn(c, F.when(F.col(c) == float("inf"), None).otherwise(F.col(c)))
 df_clean = df_clean.dropna()
 ```
 
-**`.dropna()`** — transformation narrow. Chaque worker supprime les lignes avec des nulls dans sa propre partition, indépendamment. Pas de shuffle nécessaire pour savoir si une ligne est nulle.
+Le `.drop()` sur 75 colonnes prend **0.3ms** — Spark met juste à jour son plan, aucune donnée n'est lue. Le remplacement des `inf/-inf` est nécessaire car Spark génère des valeurs infinies quand il divise par zéro (ex: `bytes_rate` sur une durée nulle) et MLLib ne sait pas les gérer.
 
 ---
 
-### 5.6 La lazy evaluation — le moteur derrière tout ça
+### 6.6 La lazy evaluation — le moteur derrière tout ça
 
 C'est le concept central de Spark, et c'est là que ça diffère fondamentalement de pandas. En pandas, chaque opération s'exécute immédiatement et modifie les données en mémoire. En Spark, les opérations sont soit des **transformations** (lazy), soit des **actions** (qui déclenchent le calcul).
 
@@ -258,62 +335,38 @@ La démonstration concrète sur ce projet :
 
 ---
 
-### 5.7 Préparation ML — StringIndexer, VectorAssembler, randomSplit
+### 6.7 Préparation ML — StringIndexer, VectorAssembler, randomSplit
 
 ```python
 indexer = StringIndexer(inputCol="label", outputCol="label_index")
-df_indexed = indexer.fit(df_clean).transform(df_clean)
-```
+df_indexed = indexer.fit(df_clean).transform(df_clean)   # fit = action, transform = lazy
 
-**`StringIndexer.fit()`** — c'est une **action**. Pour créer le mapping label → index (DDoS_LOIT = 0, Benign = 1, etc.), Spark doit scanner tout `df_clean` pour compter les occurrences de chaque label et les trier par fréquence. C'est un scan complet — et comme `df_clean` est encore lazy (il repart des CSV), ce scan relit toute la chaîne depuis le début.
-
-**`.transform()`** — transformation lazy ensuite. Spark va juste ajouter au plan "ajouter une colonne `label_index` avec le mapping appris". Rien n'est calculé encore.
-
-```python
-feature_cols = [c for c in df_indexed.columns if c not in ["label", "label_index"]]
 assembler = VectorAssembler(inputCols=feature_cols, outputCol="features")
-df_final = assembler.transform(df_indexed)
+df_final = assembler.transform(df_indexed)               # lazy
+
+train_df, test_df = df_final.randomSplit([0.8, 0.2], seed=42)  # lazy
 ```
 
-**`VectorAssembler.transform()`** — transformation lazy. Spark va ajouter au plan "regrouper les 45 colonnes numériques en un seul vecteur dense". MLLib exige cette structure parce qu'un algorithme ML ne peut pas recevoir 45 colonnes séparées — il lui faut un seul vecteur. Toujours lazy, rien n'est calculé.
+**`StringIndexer.fit()`** est une action — Spark scanne tout `df_clean` pour apprendre le mapping `label → index` (DDoS_LOIT=0, Benign=1…). Le `VectorAssembler` regroupe les 45 features numériques dans un seul vecteur dense — format obligatoire pour tous les algorithmes Spark MLLib.
 
-```python
-train_df, test_df = df_final.randomSplit([0.8, 0.2], seed=42)
-```
-
-**`.randomSplit()`** — transformation lazy. Spark va ajouter au plan une condition de routage probabiliste sur chaque ligne (basée sur un hash du seed). Aucun shuffle n'est nécessaire — chaque partition est découpée indépendamment selon cette probabilité. Le nombre de partitions reste identique (26 partitions pour les deux DataFrames).
-
-```python
-n_train = train_df.count()  # action → 229,655
-n_test  = test_df.count()   # action → 57,297
-```
-
-Ces deux `.count()` déclenchent deux scans complets depuis les CSV — parce que rien n'est encore matérialisé sur disque. C'est pour ça que cette étape prend 82.5 secondes : environ 3 scans enchaînés (StringIndexer.fit + count train + count test), chacun relisant toute la chaîne.
+Le `randomSplit` ne génère pas de shuffle : chaque partition est découpée indépendamment selon une probabilité basée sur le seed. Split final : **229 655 lignes train / 57 297 lignes test**.
 
 ---
 
-### 5.8 Sauvegarde intermédiaire en Parquet
+### 6.8 Sauvegarde intermédiaire en Parquet
 
 ```python
 df_final.write.parquet("../data/processed/df_final.parquet", mode="overwrite")
-```
-
-**`.write.parquet()`** — c'est une **action**. Spark va exécuter tout le plan accumulé depuis le début et écrire les résultats sur disque au format **Parquet** (format binaire columaire, compressé). C'est la "matérialisation" du plan lazy en données réelles.
-
-Pourquoi c'est important pour la suite ? Parce que la CrossValidation va relire `train_df` **80 fois** (une fois par fold et par combinaison de paramètres). Si `train_df` n'est pas sauvegardé, chaque un de ces 80 entraînements devrait relire les CSV bruts + refaire tout le preprocessing. En sauvegardant en Parquet d'abord, les 80 entraînements lisent directement les données préprocessées sur disque — bien plus rapide.
-
-```python
 df_final = spark.read.parquet("../data/processed/df_final.parquet")
-train_df, test_df = df_final.randomSplit([0.8, 0.2], seed=42)
 ```
 
-Ici on recrée `train_df` et `test_df` à partir du Parquet. `.read.parquet()` est encore lazy — Spark note le chemin du fichier dans le plan, mais ne lit rien. La lecture réelle aura lieu lors du premier entraînement.
+`.write.parquet()` est une action — Spark exécute tout le plan et matérialise les données sur disque. C'est indispensable avant la CrossValidation : sans ça, chacun des 80 entraînements relirait les CSV bruts + referait tout le preprocessing depuis le début.
 
-**Pourquoi Parquet plutôt que CSV ?** Parquet est un format **columaire** — il stocke les données colonne par colonne plutôt que ligne par ligne. Pour un modèle ML qui lit souvent une seule feature à la fois (pour calculer les seuils de découpage des arbres), c'est beaucoup plus efficace que de lire toutes les colonnes à chaque fois.
+Parquet est columaire (stocke colonne par colonne) — bien plus efficace que CSV pour le ML, où les algorithmes lisent souvent une seule feature à la fois pour calculer les seuils de découpage des arbres.
 
 ---
 
-### 5.9 Configuration mémoire et tuning
+### 6.9 Configuration mémoire et tuning
 
 Une partie importante du travail Big Data, c'est le tuning — ajuster Spark pour que ça tourne sans crash sur la machine disponible.
 
@@ -329,7 +382,7 @@ Une partie importante du travail Big Data, c'est le tuning — ajuster Spark pou
 
 ---
 
-### 5.10 Mesures de performance — pipeline instrumenté de bout en bout
+### 6.10 Mesures de performance — pipeline instrumenté de bout en bout
 
 J'ai instrumenté chaque étape du pipeline avec `time.time()` pour avoir des mesures précises sur une exécution réelle complète :
 
@@ -356,7 +409,7 @@ L'inférence à **125s** donne un débit de **457 connexions/seconde** avec une 
 
 ---
 
-### 5.11 Spark UI — observer le plan d'exécution en temps réel
+### 6.11 Spark UI — observer le plan d'exécution en temps réel
 
 Le **Spark UI** (port 4040 pendant l'exécution, port 18080 pour l'History Server après) permet d'observer exactement ce que Spark fait en interne pour chaque opération.
 
@@ -386,9 +439,9 @@ Dans les stages de lecture, on voit que les stages lisant le Parquet (après la 
 
 ---
 
-## 6. Phase Batch — Machine Learning distribué
+## 7. Phase Batch — Machine Learning distribué
 
-### 6.1 Choix du modèle
+### 7.1 Choix du modèle
 
 J'ai choisi le **Random Forest** pour plusieurs raisons pratiques :
 - **Robuste au déséquilibre résiduel** des classes
@@ -398,7 +451,7 @@ J'ai choisi le **Random Forest** pour plusieurs raisons pratiques :
 
 ---
 
-### 6.2 Recherche d'hyperparamètres — CrossValidator
+### 7.2 Recherche d'hyperparamètres — CrossValidator
 
 Pour trouver les meilleurs hyperparamètres **sans risquer l'overfitting**, j'ai utilisé un `CrossValidator` Spark avec une `ParamGridBuilder` — l'équivalent Spark du `GridSearchCV` de scikit-learn.
 
@@ -426,7 +479,7 @@ Un arbre de profondeur 15 a jusqu'à 2^15 = 32 768 feuilles. Sur 230K lignes d'e
 
 ---
 
-### 6.3 Stratégie d'ensemble
+### 7.3 Stratégie d'ensemble
 
 Au lieu d'un seul gros modèle, j'ai entraîné **10 Random Forests indépendants** — 100 arbres chacun, profondeur max 11, seed différente pour chaque. La prédiction finale = **vote majoritaire** (mode des 10 prédictions).
 
@@ -438,7 +491,7 @@ Durée totale mesurée : **249.5s** — 25s/modèle en moyenne, avec un min de 2
 
 ---
 
-### 6.4 Feature importance
+### 7.4 Feature importance
 
 Les features les plus discriminantes et ce qu'elles signifient concrètement :
 
@@ -452,7 +505,7 @@ Ce qui m'a frappé, c'est que les features les plus importantes ne sont pas les 
 
 ---
 
-### 6.5 Évaluation
+### 7.5 Évaluation
 
 Split train/test 80/20, randomisé avec `seed=42`.
 
@@ -484,7 +537,7 @@ Important à noter : la précision reste très haute sur ces deux classes (98.66
 
 ---
 
-## 7. Dashboard SOC
+## 8. Dashboard SOC
 
 Les résultats du batch sont exportés en **Delta Lake** vers `data/dashboard/` et lus directement par le dashboard Dash/Plotly.
 
@@ -504,21 +557,13 @@ Fonctionnalités interactives : filtre par classe (clic sur barre ou bulle), sé
 
 ---
 
-## 8. Phase Streaming
+## 9. Phase Streaming
 
-La phase streaming est conçue pour charger les modèles entraînés sans ré-entraînement et les appliquer sur un flux de connexions réseau simulé en temps réel via Spark Structured Streaming.
-
-```python
-model = RandomForestClassificationModel.load("data/models/model_0")
-predictions = model.transform(stream_df)
-alerts = predictions.filter(col("prediction") != benign_index)
-```
-
-> 🚧 Cette phase est en cours de développement dans la partie 2.
+La phase streaming charge les modèles entraînés en batch et les applique sur un flux de connexions réseau en temps réel via Spark Structured Streaming, sans ré-entraînement. Cette partie est développée dans la partie 2 du projet.
 
 ---
 
-## 9. Analyse des limites
+## 10. Analyse des limites
 
 **Ce que ce système détecte bien :**
 - Attaques volumétriques (DoS/DDoS) → patterns de flags TCP et de volume très distincts
@@ -535,7 +580,7 @@ alerts = predictions.filter(col("prediction") != benign_index)
 
 ---
 
-## 10. Conclusion
+## 11. Conclusion
 
 Ce projet m'a permis de construire un pipeline IDS complet et fonctionnel sur des données réelles de 2GB, de l'ingestion jusqu'au dashboard — le tout en passant par Apache Spark pour chaque étape.
 
@@ -547,7 +592,7 @@ Les mesures de performance montrent que 64% du temps de pipeline est passé à e
 
 ---
 
-## 11. Références
+## 12. Références
 
 - **Dataset** : BCCC-CIC-IDS-2017, Canadian Institute for Cybersecurity / MIT — Kaggle
 - **Apache Spark / MLLib** : spark.apache.org

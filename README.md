@@ -58,7 +58,7 @@ Construire un pipeline Big Data de détection d'intrusions réseau en deux phase
 ## Architecture du pipeline
 
 <div align="center">
-  <img src="assets/schema_architecture_pipeline.png" width="400" alt="Architecture du pipeline"/>
+  <img src="assets/architecture_pipeline_netsentinel_png.png" width="400" alt="Architecture du pipeline"/>
   <p><em>Architecture Pipeline NetSentinel</em></p>
 </div>
 
