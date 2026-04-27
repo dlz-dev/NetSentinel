@@ -58,40 +58,43 @@ def train_cross_validator(train_set: DataFrame, parameters: dict) -> object:
         evaluator=evaluator,
         numFolds=grid["n_folds"],
         seed=seed,
+        parallelism=1,
     )
 
     # je logue le dataset d'entraînement dans MLflow pour savoir exactement sur quelles données
     # ce modèle a été entraîné — utile si le modèle se dégrade en prod et qu'on veut comparer
     dataset = mlflow.data.from_spark(
         train_set,
-        source="data/05_model_input/train.parquet",
+        path="data/05_model_input/train.parquet",
         name="train_set"
     )
     mlflow.log_input(dataset, context="training")
 
-    # j'active le logging automatique MLflow — il va enregistrer tous les paramètres et métriques sans que j'aie à le faire manuellement
-    mlflow.pyspark.ml.autolog()
     cv_model = cv.fit(train_set)
 
     best = cv_model.bestModel
     best_f1 = max(cv_model.avgMetrics)
     logger.info(f"CV terminé — F1={best_f1:.4f}, numTrees={best.getNumTrees}, maxDepth={best.getOrDefault('maxDepth')}")
 
-    # j'enregistre le meilleur modèle dans le Model Registry MLflow
-    # le registry permet de gérer le cycle de vie : Staging → Production → Archived
-    run_id = mlflow.active_run().info.run_id
-    model_uri = f"runs:/{run_id}/best_cv_model"
-    mlflow.spark.log_model(cv_model.bestModel, artifact_path="best_cv_model")
-    registered = mlflow.register_model(model_uri=model_uri, name="netsentinel-ids")
-
-    # je passe le modèle en Staging — prêt à être validé avant mise en production
-    client = MlflowClient()
-    client.transition_model_version_stage(
-        name="netsentinel-ids",
-        version=registered.version,
-        stage="Staging",
-    )
-    logger.info(f"Modèle enregistré dans le registry — version {registered.version} en Staging")
+    try:
+        run_id = mlflow.active_run().info.run_id
+        model_uri = f"runs:/{run_id}/best_cv_model"
+        mlflow.spark.log_model(cv_model.bestModel, artifact_path="best_cv_model")
+        registered = mlflow.register_model(model_uri=model_uri, name="netsentinel-ids")
+        client = MlflowClient()
+        client.transition_model_version_stage(
+            name="netsentinel-ids",
+            version=registered.version,
+            stage="Staging",
+        )
+        logger.info(f"Modèle enregistré dans le registry — version {registered.version} en Staging")
+    except Exception as e:
+        logger.warning(f"Artefact MLflow non sauvegardé ({e.__class__.__name__}) — params loggués manuellement")
+        mlflow.log_params({
+            "best_numTrees": best.getNumTrees,
+            "best_maxDepth": best.getOrDefault("maxDepth"),
+        })
+        mlflow.log_metric("cv_best_f1", best_f1)
     return cv_model
 
 
@@ -115,8 +118,10 @@ def train_ensemble(train_set: DataFrame, parameters: dict) -> list:
         model = rf.fit(train_set)
         models.append(model)
 
-        # je logue chaque modèle dans MLflow pour pouvoir le retrouver et le déployer plus tard
-        mlflow.spark.log_model(model, artifact_path=f"rf_model_{i}")
+        try:
+            mlflow.spark.log_model(model, artifact_path=f"rf_model_{i}")
+        except Exception as e:
+            logger.warning(f"rf_model_{i} non sauvegardé ({e.__class__.__name__})")
         logger.info(f"Modèle {i+1}/{n_models} entraîné")
 
     return models

@@ -1,13 +1,17 @@
-# grille de cross validation
-cv_grid:
-  num_trees: [30, 50, 75, 100]
-  max_depth: [5, 8, 10, 11]
-  n_folds: 5
+data_science:
+  # grille de cross validation
+  cv_grid:
+    num_trees: [30, 50, 75, 100]
+    max_depth: [5, 8, 10, 11]
+    n_folds: 5
 
-# meilleurs paramètres trouvés (utilisés pour l'ensemble)
-best_params:
-  num_trees: 100
-  max_depth: 11
+  # meilleurs paramètres trouvés (utilisés pour l'ensemble)
+  best_params:
+    num_trees: 100
+    max_depth: 11
 
-# nombre de modèle dans l'ensemble 
-n_models: 10
+  # nombre de modèles dans l'ensemble
+  n_models: 10
+
+  # graine aléatoire
+  random_seed: 42

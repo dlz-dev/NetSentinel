@@ -1,28 +1,42 @@
+import logging
+from pathlib import Path
 import dlt
-import os
-from dlt.sources.filesystem import filesystem, read_csv
+import pandas as pd
+import pyarrow as pa
+import pyarrow.parquet as pq
 
-# je définis ma source de données — dlt va lire tous les CSV du dossier 01_raw
-@dlt.source
-def network_traffic_source(data_path: str = "data/01_raw"):
-    # je crée une ressource pour chaque CSV du dossier
-    # dlt gère automatiquement la lecture, la validation du schéma et les erreurs
-    yield filesystem(bucket_url=data_path, file_glob="*.csv") | read_csv()
+logger = logging.getLogger(__name__)
+
+# je définis la source dlt — chaque CSV devient une ressource validée par dlt
+@dlt.resource(name="raw_traffic", write_disposition="replace")
+def network_traffic_resource(data_path: str = "data/01_raw"):
+    for csv_file in sorted(Path(data_path).glob("*.csv")):
+        df = pd.read_csv(csv_file, low_memory=False)
+        # je normalise les noms de colonnes (minuscules, espaces → underscores)
+        df.columns = [c.strip().lower().replace(" ", "_").replace("/", "_") for c in df.columns]
+        logger.info(f"dlt — lu {csv_file.name} : {len(df):,} lignes")
+        yield df
 
 
-def run_ingestion(data_path: str = "data/01_raw", destination_path: str = "data/02_intermediate"):
-    # je configure le pipeline dlt avec Delta comme format de sortie
-    # Delta garantit des écritures ACID — pas de données corrompues si le pipeline plante
-    pipeline = dlt.pipeline(
-        pipeline_name="netsentinel_ingestion",
-        destination=dlt.destinations.filesystem(destination_path),
-        dataset_name="raw_traffic",
+def run_ingestion(data_path: str = "data/01_raw", destination_path: str = "data/02_intermediate/raw_traffic"):
+    # je collecte tous les CSV via dlt pour la validation de schéma
+    # puis j'écris en un seul fichier Parquet via pyarrow (beaucoup plus rapide que la destination filesystem)
+    frames = []
+    for batch in network_traffic_resource(data_path):
+        if isinstance(batch, pd.DataFrame):
+            frames.append(batch)
+
+    combined = pd.concat(frames, ignore_index=True)
+    logger.info(f"dlt ingestion terminée — {len(combined):,} lignes, {len(combined.columns)} colonnes")
+
+    # écriture Parquet en un seul fichier
+    out_path = Path(destination_path)
+    out_path.mkdir(parents=True, exist_ok=True)
+    pq.write_table(
+        pa.Table.from_pandas(combined, preserve_index=False),
+        out_path / "data.parquet",
     )
-
-    # je lance l'ingestion — dlt lit les CSV, valide le schéma et écrit en Parquet
-    load_info = pipeline.run(network_traffic_source(data_path))
-    print(load_info)
-    return load_info
+    logger.info(f"Parquet écrit dans {destination_path}/data.parquet")
 
 
 if __name__ == "__main__":

@@ -8,7 +8,7 @@ def create_pipeline(**kwargs) -> Pipeline:
         Node(
             func=run_dlt_ingestion,
             inputs="params:data_processing",
-            outputs=None,
+            outputs="raw_traffic",
             name="run_dlt_ingestion_node",
         ),
         Node(

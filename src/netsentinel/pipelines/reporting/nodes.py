@@ -1,6 +1,7 @@
 import logging
 import mlflow
 from pyspark.ml.evaluation import MulticlassClassificationEvaluator
+from pyspark.ml.functions import vector_to_array
 from pyspark.sql import DataFrame
 from pyspark.sql import functions as F
 
@@ -29,31 +30,37 @@ def evaluate_ensemble(ensemble_models: list, cv_model: object, test_set: DataFra
     # j'utilise aussi le meilleur modèle CV directement pour comparer
     cv_preds = cv_model.transform(test_set)
 
-    evaluator_f1 = MulticlassClassificationEvaluator(labelCol="label_index", predictionCol="prediction", metricName="f1")
-    evaluator_acc = MulticlassClassificationEvaluator(labelCol="label_index", predictionCol="prediction", metricName="accuracy")
+    def eval(metric_name):
+        return MulticlassClassificationEvaluator(
+            labelCol="label_index", predictionCol="prediction", metricName=metric_name
+        ).evaluate(cv_preds)
 
-    f1 = evaluator_f1.evaluate(cv_preds)
-    accuracy = evaluator_acc.evaluate(cv_preds)
+    accuracy  = eval("accuracy")
+    f1        = eval("f1")
+    precision = eval("weightedPrecision")
+    recall    = eval("weightedRecall")
 
-    metrics = {"accuracy": round(accuracy, 4), "f1_score": round(f1, 4)}
+    metrics = {
+        "accuracy":  round(accuracy,  4),
+        "f1_score":  round(f1,        4),
+        "precision": round(precision, 4),
+        "recall":    round(recall,    4),
+    }
 
-    # je logue les métriques finales dans MLflow pour les retrouver dans l'UI
     mlflow.log_metrics(metrics)
-    logger.info(f"Accuracy : {accuracy:.4f} | F1 : {f1:.4f}")
+    logger.info(f"Accuracy : {accuracy:.4f} | F1 : {f1:.4f} | Precision : {precision:.4f} | Recall : {recall:.4f}")
     return metrics
 
 
-def export_dashboard(test_set: DataFrame, cv_model: object) -> DataFrame:
-    # j'applique le meilleur modèle sur le test set pour générer les prédictions finales
+def export_dashboard(test_set: DataFrame, cv_model: object):
     predictions = cv_model.transform(test_set)
 
-    # je garde uniquement les colonnes utiles pour le dashboard plotly
     dashboard_df = predictions.select(
         "label",
         "label_index",
         "prediction",
-        "probability",
+        vector_to_array(F.col("probability")).alias("probability"),
     )
 
     logger.info(f"Export dashboard : {dashboard_df.count():,} lignes")
-    return dashboard_df
+    return dashboard_df.toPandas()

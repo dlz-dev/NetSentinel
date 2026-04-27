@@ -29,13 +29,17 @@ COLS_TO_DROP = [
 ]
 
 
-def run_dlt_ingestion(parameters: dict) -> None:
-    # je lance le pipeline dlt avant tout — il lit les CSV bruts et produit
-    # du Parquet propre dans data/02_intermediate/ que Kedro consommera ensuite
+def run_dlt_ingestion(parameters: dict) -> DataFrame:
+    from pyspark.sql import SparkSession
+    destination = "data/02_intermediate/raw_traffic"
+    # dlt lit les CSV depuis 01_raw, valide le schéma et écrit en Parquet
     run_ingestion(
         data_path=parameters["raw_data_path"],
-        destination_path="data/02_intermediate/raw_traffic",
+        destination_path=destination,
     )
+    # Spark relit le Parquet produit par dlt et le passe au pipeline Kedro
+    spark = SparkSession.getActiveSession()
+    return spark.read.parquet(f"{destination}/data.parquet")
 
 
 def ingest_raw_traffic(raw_traffic: DataFrame):
