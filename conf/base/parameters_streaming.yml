@@ -1,0 +1,14 @@
+streaming:
+  kafka:
+    bootstrap_servers: "localhost:9092"
+    topic: "netsentinel-flows"
+
+  live_capture:
+    batch_size: 1
+    idle_timeout: 2
+    active_timeout: 10
+
+  dataset_replay:
+    samples_per_class: 16
+    cycle_delay: 120
+    min_class_samples: 500

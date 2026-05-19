@@ -1,16 +1,23 @@
-"""Live network capture — sklearn RF (rapide) pour le trafic temps réel.
+"""Live network capture — Spark RF pour le trafic temps réel.
+
+Capture le trafic WiFi flux par flux via nfstream, classifie avec le modèle
+Spark RF entraîné par Kedro, et publie chaque résultat dans le topic Kafka.
 
 Usage:
   python streaming/live_capture.py
-  python streaming/live_capture.py --retrain
   python streaming/live_capture.py --clean
 """
-import pickle
+import json
 import sys
 from datetime import datetime
 from pathlib import Path
 
+# spark_model configure HADOOP_HOME / PYSPARK_PYTHON avant tout import PySpark
+import spark_model
+
 import pandas as pd
+import yaml
+from kafka import KafkaProducer
 from nfstream import NFStreamer
 
 
@@ -31,83 +38,18 @@ def _find_wifi_iface() -> str:
     return r"\Device\NPF_{F586232C-3E4E-4E05-87D8-C51F050EF1EF}"
 
 
+def _streaming_cfg() -> dict:
+    raw = yaml.safe_load(Path("conf/base/parameters_streaming.yml").read_text())
+    return raw["streaming"]
+
+
+_CFG       = _streaming_cfg()
 IFACE      = _find_wifi_iface()
-OUT_DIR    = Path("data/streaming/predictions")
-BATCH_SIZE = 1
-IDLE_T     = 2
-ACTIVE_T   = 10
+BATCH_SIZE = _CFG["live_capture"]["batch_size"]
+IDLE_T     = _CFG["live_capture"]["idle_timeout"]
+ACTIVE_T   = _CFG["live_capture"]["active_timeout"]
 
 print(f"[live] Interface : {IFACE}")
-
-FEATURE_COLS = [
-    "src_port", "dst_port", "duration", "packets_count", "fwd_packets_count",
-    "bwd_packets_count", "total_payload_bytes", "fwd_total_payload_bytes",
-    "bwd_total_payload_bytes", "payload_bytes_max", "payload_bytes_mean",
-    "payload_bytes_std", "fwd_payload_bytes_mean", "fwd_payload_bytes_std",
-    "bwd_payload_bytes_mean", "bwd_payload_bytes_std", "fwd_avg_segment_size",
-    "bwd_avg_segment_size", "avg_segment_size", "fwd_init_win_bytes",
-    "bwd_init_win_bytes", "bytes_rate", "fwd_bytes_rate", "bwd_bytes_rate",
-    "packets_rate", "bwd_packets_rate", "fwd_packets_rate", "down_up_rate",
-    "fin_flag_counts", "psh_flag_counts", "urg_flag_counts", "syn_flag_counts",
-    "ack_flag_counts", "rst_flag_counts", "fwd_syn_flag_counts",
-    "fwd_ack_flag_counts", "fwd_rst_flag_counts", "packets_iat_mean",
-    "packet_iat_std", "packet_iat_max", "packet_iat_min", "packet_iat_total",
-    "fwd_packets_iat_mean", "fwd_packets_iat_std", "fwd_packets_iat_max",
-    "fwd_packets_iat_min", "fwd_packets_iat_total", "bwd_packets_iat_mean",
-    "bwd_packets_iat_std", "bwd_packets_iat_max", "bwd_packets_iat_min",
-    "bwd_packets_iat_total",
-]
-
-MODEL_CACHE = Path("data/07_model_output/sklearn_rf_live.pkl")
-DATA_SRC    = "data/02_intermediate/raw_traffic/data.parquet"
-
-
-def _train_and_cache():
-    from sklearn.ensemble import RandomForestClassifier
-
-    print("[live] Entraînement sklearn RF (~90s)…")
-    df = pd.read_parquet(DATA_SRC)
-
-    N_PER_ATTACK = 4_000
-    N_BENIGN     = 20_000
-    MIN_SAMPLES  = 500
-
-    parts = [
-        df[df["label"] == "Benign"].sample(
-            n=min(N_BENIGN, int((df["label"] == "Benign").sum())),
-            random_state=42,
-        )
-    ]
-    for cls in [l for l in df["label"].unique() if l != "Benign"]:
-        cls_df = df[df["label"] == cls]
-        if len(cls_df) < MIN_SAMPLES:
-            continue
-        n = min(N_PER_ATTACK, len(cls_df))
-        parts.append(cls_df.sample(n=n, random_state=42))
-        print(f"[live]   {cls}: {n} samples")
-
-    data = pd.concat(parts, ignore_index=True)
-    del df
-
-    cols = [c for c in FEATURE_COLS if c in data.columns]
-    clf  = RandomForestClassifier(n_estimators=200, n_jobs=-1, random_state=42, min_samples_leaf=3)
-    clf.fit(data[cols].fillna(0).values, data["label"].values)
-
-    MODEL_CACHE.parent.mkdir(parents=True, exist_ok=True)
-    with open(MODEL_CACHE, "wb") as f:
-        pickle.dump((clf, cols), f)
-
-    print(f"[live] Modèle sauvegardé → {MODEL_CACHE}")
-    return clf, cols
-
-
-def _load_model():
-    if MODEL_CACHE.exists() and "--retrain" not in sys.argv:
-        print("[live] Modèle chargé depuis le cache")
-        with open(MODEL_CACHE, "rb") as f:
-            return pickle.load(f)
-    return _train_and_cache()
-
 
 _PROTO_MAP = {6: "TCP", 17: "UDP", 1: "ICMP", 58: "ICMPv6", 132: "SCTP"}
 _WELL_KNOWN_PORTS = {
@@ -198,40 +140,34 @@ def _flow_to_row(flow) -> dict:
         "packet_iat_std":         _g(flow, "bidirectional_stddev_piat_ms"),
         "packet_iat_max":         _g(flow, "bidirectional_max_piat_ms"),
         "packet_iat_min":         _g(flow, "bidirectional_min_piat_ms"),
-        "packet_iat_total":       _g(flow, "bidirectional_mean_piat_ms") * max(n_bi - 1, 0),
         "fwd_packets_iat_mean":   _g(flow, "src2dst_mean_piat_ms"),
         "fwd_packets_iat_std":    _g(flow, "src2dst_stddev_piat_ms"),
         "fwd_packets_iat_max":    _g(flow, "src2dst_max_piat_ms"),
         "fwd_packets_iat_min":    _g(flow, "src2dst_min_piat_ms"),
-        "fwd_packets_iat_total":  _g(flow, "src2dst_mean_piat_ms") * max(n_fwd - 1, 0),
         "bwd_packets_iat_mean":   _g(flow, "dst2src_mean_piat_ms"),
         "bwd_packets_iat_std":    _g(flow, "dst2src_stddev_piat_ms"),
         "bwd_packets_iat_max":    _g(flow, "dst2src_max_piat_ms"),
         "bwd_packets_iat_min":    _g(flow, "dst2src_min_piat_ms"),
-        "bwd_packets_iat_total":  _g(flow, "dst2src_mean_piat_ms") * max(n_bwd - 1, 0),
     }
 
 
-def _next_epoch():
-    files = [f for f in sorted(OUT_DIR.glob("epoch_*.csv"))
-             if int(f.stem.split("_")[1]) < 90000]
-    if not files:
-        return 0
-    try:
-        return int(files[-1].stem.split("_")[1]) + 1
-    except Exception:
-        return 0
-
-
 def main():
-    if "--clean" in sys.argv and OUT_DIR.exists():
-        import shutil
-        shutil.rmtree(OUT_DIR)
-        print("[live] Dossier predictions vidé")
+    if "--clean" in sys.argv:
+        _pred = Path("data/streaming/predictions")
+        if _pred.exists():
+            import shutil
+            shutil.rmtree(_pred)
+            print("[live] Dossier predictions vidé")
 
-    OUT_DIR.mkdir(parents=True, exist_ok=True)
-    model, feat_cols = _load_model()
-    print(f"[live] Capture démarrée → {OUT_DIR}  (Ctrl+C pour arrêter)\n")
+    spark_model.init()
+
+    kafka_cfg = _CFG["kafka"]
+    producer  = KafkaProducer(
+        bootstrap_servers=kafka_cfg["bootstrap_servers"],
+        value_serializer=lambda v: json.dumps(v).encode("utf-8"),
+    )
+    topic = kafka_cfg["topic"]
+    print(f"[live] Capture démarrée → Kafka topic '{topic}'  (Ctrl+C pour arrêter)\n")
 
     streamer = NFStreamer(
         source=IFACE,
@@ -242,7 +178,6 @@ def main():
     )
 
     buffer = []
-    epoch  = _next_epoch()
 
     for flow in streamer:
         if ":" in str(flow.src_ip):
@@ -256,23 +191,30 @@ def main():
             continue
 
         try:
-            df = pd.DataFrame(buffer)
-            X  = df[feat_cols].fillna(0).astype(float).values
+            preds = spark_model.predict(buffer)
+            now   = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
 
-            df["predicted_label"] = model.predict(X)
-            df["is_attack"]       = df["predicted_label"] != "Benign"
-            df["detected_at"]     = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            df["label"]           = df["predicted_label"]
+            for row, label in zip(buffer, preds):
+                msg = {
+                    "_source":         "live",
+                    "label":           label,
+                    "src_ip":          row["src_ip"],
+                    "dst_ip":          row["dst_ip"],
+                    "src_port":        int(row["src_port"]),
+                    "dst_port":        int(row["dst_port"]),
+                    "app_name":        row["app_name"],
+                    "hostname":        row["hostname"],
+                    "n_pkts":          row["n_pkts"],
+                    "n_bytes":         row["n_bytes"],
+                    "predicted_label": label,
+                    "is_attack":       label != "Benign",
+                    "detected_at":     now,
+                }
+                producer.send(topic, msg)
 
-            out = df[["label", "src_ip", "dst_ip", "src_port", "dst_port",
-                       "app_name", "hostname", "n_pkts", "n_bytes",
-                       "predicted_label", "is_attack", "detected_at"]]
-            out.to_csv(OUT_DIR / f"epoch_{epoch:06d}.csv", index=False)
-
-            atks = int(df["is_attack"].sum())
-            top  = df["predicted_label"].value_counts().head(3).to_dict()
-            print(f"[live] epoch={epoch:04d} | {len(df)} flows | {atks} attacks | {top}")
-            epoch += 1
+            atks = sum(1 for p in preds if p != "Benign")
+            top  = pd.Series(preds).value_counts().head(3).to_dict()
+            print(f"[live] {len(preds)} flows → Kafka | {atks} attacks | {top}")
 
         except Exception as e:
             print(f"[live] Erreur inférence : {e}")

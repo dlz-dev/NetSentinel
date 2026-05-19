@@ -26,6 +26,7 @@ dependencies = [
     "langchain~=1.2.15",
     "langchain-anthropic~=1.4.1",
     "langsmith~=0.7.36",
+    "kafka-python~=2.0.2",
 ]
 
 [project.scripts]
