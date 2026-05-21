@@ -1,0 +1,506 @@
+<!DOCTYPE html>
+<html lang="fr">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>NetSentinel — Real-Time IDS Architecture</title>
+<style>
+  :root {
+    --bg: #070b12;
+    --teal: #17d6c2; --cyan: #4ee7ff; --green: #38d979;
+    --orange: #ff9f43; --amber: #ffc066; --purple: #a970ff; --red: #ff4d6d;
+  }
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%; overflow: hidden;
+    background:
+      radial-gradient(circle at 16% 16%, rgba(23,214,194,.12) 0%, transparent 28%),
+      radial-gradient(circle at 42% 9%,  rgba(56,217,121,.09)  0%, transparent 30%),
+      radial-gradient(circle at 70% 14%, rgba(255,159,67,.11)  0%, transparent 32%),
+      radial-gradient(circle at 86% 80%, rgba(169,112,255,.14) 0%, transparent 34%),
+      var(--bg);
+    font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+    color: #eef4ff;
+  }
+  canvas { display: block; position: absolute; top: 0; left: 0; width: 100%; height: 100%; }
+  .hud {
+    position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+    pointer-events: none;
+    display: flex; flex-direction: column;
+    justify-content: space-between; padding: 22px 32px;
+  }
+  .title { text-align: center; }
+  .title h1 {
+    font-size: clamp(20px, 2vw, 38px); font-weight: 800;
+    letter-spacing: .18em; color: #eef4ff;
+    text-shadow: 0 0 32px rgba(78,231,255,.22);
+  }
+  .title p {
+    margin-top: 6px; font-size: clamp(10px, .75vw, 14px);
+    letter-spacing: .1em; text-transform: uppercase; color: #3a5070;
+  }
+  .footer {
+    display: flex; justify-content: space-between; align-items: center;
+    font-size: 10px; letter-spacing: .18em; text-transform: uppercase;
+    color: rgba(238,244,255,.20);
+  }
+  .status { display: flex; align-items: center; gap: 8px; }
+  .dot {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: #00c875; box-shadow: 0 0 8px #00c875;
+    animation: blink 2s ease-in-out infinite;
+  }
+  @keyframes blink { 0%,100%{opacity:.3} 50%{opacity:1} }
+
+  #rec-btn {
+    position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+    background: rgba(11,17,27,.88); border: 1px solid rgba(255,77,109,.5);
+    color: #ff4d6d; font-family: "Courier New", monospace;
+    font-size: 11px; letter-spacing: .12em; padding: 8px 16px;
+    border-radius: 6px; cursor: pointer; transition: background .2s;
+  }
+  #rec-btn:hover { background: rgba(255,77,109,.15); }
+  #rec-btn.recording { border-color: #ff4d6d; color: #fff; animation: blink 1s ease-in-out infinite; }
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<button id="rec-btn" onclick="toggleRecord()">⏺ ENREGISTRER 15s</button>
+<div class="hud">
+  <div class="title">
+    <h1>NETSENTINEL</h1>
+    <p>Real-Time Network Intrusion Detection Architecture</p>
+  </div>
+  <div class="footer">
+    <div class="status"><div class="dot"></div>PIPELINE ACTIVE</div>
+    <div>Kafka · Spark ML · Dash · Claude</div>
+    <div>HELMo · BLOC 2 · 2025-2026</div>
+  </div>
+</div>
+<script>
+const cv  = document.getElementById('c');
+const ctx = cv.getContext('2d');
+
+let W, H, sc, ox, oy;
+let nodes = {};
+let edges = [];
+let particles = [];
+const pulses = {};
+let atk = null;
+let lastAtk = -300;
+let frame = 0;
+
+const C = {
+  teal:'#17d6c2', cyan:'#4ee7ff', green:'#38d979',
+  orange:'#ff9f43', amber:'#ffc066', purple:'#a970ff',
+  purple2:'#d4b0ff', red:'#ff4d6d',
+  text:'#eef4ff', sub:'rgba(238,244,255,.58)',
+};
+
+function rgba(hex, a) {
+  const v = hex.replace('#','');
+  const h = v.length===3 ? v.split('').map(c=>c+c).join('') : v;
+  return `rgba(${parseInt(h.slice(0,2),16)},${parseInt(h.slice(2,4),16)},${parseInt(h.slice(4,6),16)},${a})`;
+}
+
+function sx(x){ return ox + x * sc; }
+function sy(y){ return oy + y * sc; }
+function ss(v){ return v * sc; }
+function pt(x,y){ return {x:sx(x),y:sy(y)}; }
+
+function anchor(id, side) {
+  const n = nodes[id];
+  if (!n) return {x:0,y:0};
+  if (side==='left')   return {x:n.x-n.w/2, y:n.y};
+  if (side==='right')  return {x:n.x+n.w/2, y:n.y};
+  if (side==='top')    return {x:n.x,        y:n.y-n.h/2};
+  if (side==='bottom') return {x:n.x,        y:n.y+n.h/2};
+  return {x:n.x, y:n.y};
+}
+
+function polyLen(pts) {
+  let l=0;
+  for (let i=0;i<pts.length-1;i++) l+=Math.hypot(pts[i+1].x-pts[i].x, pts[i+1].y-pts[i].y);
+  return l;
+}
+function polyAt(pts, t) {
+  const total = polyLen(pts);
+  let rem = total * Math.max(0, Math.min(1, t));
+  for (let i=0;i<pts.length-1;i++) {
+    const a=pts[i], b=pts[i+1];
+    const seg = Math.hypot(b.x-a.x, b.y-a.y);
+    if (rem<=seg) { const u=seg?rem/seg:0; return {x:a.x+(b.x-a.x)*u, y:a.y+(b.y-a.y)*u}; }
+    rem-=seg;
+  }
+  return pts[pts.length-1];
+}
+
+function roundRect(x,y,w,h,r) {
+  ctx.beginPath();
+  ctx.moveTo(x+r,y);
+  ctx.arcTo(x+w,y, x+w,y+h, r);
+  ctx.arcTo(x+w,y+h, x,y+h, r);
+  ctx.arcTo(x,y+h, x,y, r);
+  ctx.arcTo(x,y, x+w,y, r);
+  ctx.closePath();
+}
+
+// ── Layout ───────────────────────────────────────────────────
+function buildLayout() {
+  sc = Math.min(W/1920, H/860);
+  ox = (W - 1920*sc) / 2;
+  oy = (H -  860*sc) / 2;
+
+  nodes = {
+    wifi:    {x:sx(130), y:sy(175), w:ss(175), h:ss(46),  title:'WiFi · nfstream',    sub:'live capture',              color:C.cyan   },
+    live:    {x:sx(130), y:sy(315), w:ss(185), h:ss(58),  title:'live_capture.py',    sub:'Kafka producer',             color:C.teal   },
+    dataset: {x:sx(130), y:sy(690), w:ss(190), h:ss(46),  title:'CIC-IDS-2017',       sub:'dataset source',            color:C.cyan   },
+    replay:  {x:sx(130), y:sy(550), w:ss(190), h:ss(58),  title:'dataset_replay.py',  sub:'Kafka producer',             color:C.teal   },
+    spark:   {x:sx(420), y:sy(430), w:ss(190), h:ss(72),  title:'spark_model.py',     sub:'Spark RF Model',             color:C.green  },
+    kafka:   {x:sx(710), y:sy(430), w:ss(200), h:ss(76),  title:'Kafka Broker',       sub:'topic: netsentinel-flows',   color:C.orange },
+    consumer:{x:sx(1000),y:sy(430), w:ss(190), h:ss(62),  title:'kafka_consumer.py',  sub:'stream processor',           color:C.orange },
+    csvLive: {x:sx(1275),y:sy(300), w:ss(185), h:ss(58),  title:'epoch_000001.csv',   sub:'live traffic · 0–89 999',   color:C.amber  },
+    csvAtk:  {x:sx(1275),y:sy(560), w:ss(185), h:ss(58),  title:'epoch_090001.csv',   sub:'attack replay · 90 000+',   color:C.amber  },
+    dash:    {x:sx(1570),y:sy(430), w:ss(185), h:ss(70),  title:'Dash Dashboard',     sub:'visual analytics',           color:C.purple },
+    claude:  {x:sx(1810),y:sy(430), w:ss(170), h:ss(62),  title:'Claude Haiku',       sub:'AI threat analysis',         color:C.purple2},
+  };
+
+  Object.keys(nodes).forEach(id => { if (!(id in pulses)) pulses[id]={v:0,c:nodes[id].color}; });
+
+  edges = [
+    {to:'live',    color:C.cyan,    label:'WiFi flows',
+      pts:()=>[anchor('wifi','bottom'),   anchor('live','top')]},
+    {to:'replay',  color:C.cyan,    label:'dataset rows',
+      pts:()=>[anchor('dataset','top'),   anchor('replay','bottom')]},
+    {to:'spark',   color:C.teal,    label:'',
+      pts:()=>[anchor('live','right'), pt(270,315), pt(270,390), anchor('spark','left')]},
+    {to:'spark',   color:C.teal,    label:'',
+      pts:()=>[anchor('replay','right'), pt(270,550), pt(270,470), anchor('spark','left')]},
+    {to:'kafka',   color:C.orange,  label:'JSON messages',
+      pts:()=>[anchor('spark','right'),  anchor('kafka','left')]},
+    {to:'consumer',color:C.orange,  label:'',
+      pts:()=>[anchor('kafka','right'),  anchor('consumer','left')]},
+    {to:'csvLive', color:C.amber,   label:'live traffic',
+      pts:()=>[anchor('consumer','right'), pt(1125,430), pt(1125,300), anchor('csvLive','left')]},
+    {to:'csvAtk',  color:C.amber,   label:'attack replay',
+      pts:()=>[anchor('consumer','right'), pt(1125,430), pt(1125,560), anchor('csvAtk','left')]},
+    {to:'dash',    color:C.purple,  label:'',
+      pts:()=>[anchor('csvLive','right'), pt(1410,300), pt(1410,390), anchor('dash','left')]},
+    {to:'dash',    color:C.purple,  label:'',
+      pts:()=>[anchor('csvAtk','right'),  pt(1410,560), pt(1410,470), anchor('dash','left')]},
+    {to:'claude',  color:C.purple2, label:'attack alert',
+      pts:()=>[anchor('dash','right'),   anchor('claude','left')]},
+  ];
+
+  particles = [];
+  atk = null;
+}
+
+// ── Resize ───────────────────────────────────────────────────
+function resize() {
+  W = window.innerWidth; H = window.innerHeight;
+  const dpr = window.devicePixelRatio || 1;
+  cv.width = W*dpr; cv.height = H*dpr;
+  cv.style.width = W+'px'; cv.style.height = H+'px';
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  buildLayout();
+}
+
+// ── Swimlanes ────────────────────────────────────────────────
+const LANES = [
+  {label:'PRODUCERS',       x1:16,   x2:250,  c:'#17d6c2'},
+  {label:'ML INFERENCE',    x1:312,  x2:532,  c:'#38d979'},
+  {label:'STREAMING LAYER', x1:596,  x2:1112, c:'#ff9f43'},
+  {label:'PERSISTENCE',     x1:1162, x2:1388, c:'#ffc066'},
+  {label:'ANALYSIS',        x1:1458, x2:1916, c:'#a970ff'},
+];
+
+function drawSwimlanes() {
+  LANES.forEach(lane => {
+    const x=sx(lane.x1), y=sy(128), w=sx(lane.x2)-x, h=sy(752)-y;
+    roundRect(x,y,w,h, ss(18));
+    ctx.fillStyle = rgba(lane.c, 0.022); ctx.fill();
+    ctx.strokeStyle = rgba(lane.c, 0.10); ctx.lineWidth=1; ctx.stroke();
+    ctx.fillStyle = rgba(lane.c, 0.60);
+    ctx.font = `600 ${ss(10)}px "Courier New", monospace`;
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(lane.label, x+ss(16), y+ss(22));
+  });
+}
+
+// ── Edges ────────────────────────────────────────────────────
+function drawEdges() {
+  edges.forEach(e => {
+    const pts = e.pts();
+    ctx.save();
+    ctx.setLineDash([ss(6),ss(9)]);
+    ctx.strokeStyle = rgba(e.color, 0.22);
+    ctx.lineWidth = 1.4;
+    ctx.beginPath();
+    ctx.moveTo(pts[0].x, pts[0].y);
+    pts.slice(1).forEach(p => ctx.lineTo(p.x, p.y));
+    ctx.stroke();
+    ctx.restore();
+
+    const end=pts[pts.length-1], prev=pts[pts.length-2];
+    const ang = Math.atan2(end.y-prev.y, end.x-prev.x);
+    const as = ss(8);
+    ctx.save();
+    ctx.translate(end.x, end.y); ctx.rotate(ang);
+    ctx.beginPath();
+    ctx.moveTo(0,0); ctx.lineTo(-as,-as*.55); ctx.lineTo(-as,as*.55);
+    ctx.closePath();
+    ctx.fillStyle = rgba(e.color, 0.85); ctx.fill();
+    ctx.restore();
+
+    if (e.label) {
+      const mid = polyAt(pts, 0.52);
+      ctx.fillStyle = rgba(e.color, 0.68);
+      ctx.font = `${ss(9)}px "Courier New", monospace`;
+      ctx.textAlign='left'; ctx.textBaseline='bottom';
+      ctx.fillText(e.label, mid.x+ss(8), mid.y-ss(6));
+    }
+  });
+}
+
+// ── Nodes ────────────────────────────────────────────────────
+function drawNode(id) {
+  const n = nodes[id];
+  const lx=n.x-n.w/2, ly=n.y-n.h/2, r=ss(12);
+
+  // Outer glow
+  const og = ctx.createRadialGradient(n.x,n.y, 0, n.x,n.y, Math.max(n.w,n.h)*1.1);
+  og.addColorStop(0, rgba(n.color, 0.15));
+  og.addColorStop(1, 'transparent');
+  ctx.fillStyle=og;
+  ctx.beginPath();
+  ctx.ellipse(n.x,n.y, n.w*.8, n.h*1.5, 0, 0, Math.PI*2);
+  ctx.fill();
+
+  // Glass card
+  ctx.save();
+  roundRect(lx,ly,n.w,n.h, r); ctx.clip();
+  ctx.fillStyle='rgba(11,17,27,.90)'; ctx.fillRect(lx,ly,n.w,n.h);
+  const sh=ctx.createLinearGradient(lx,ly, lx,ly+n.h*.45);
+  sh.addColorStop(0, rgba(n.color, 0.055)); sh.addColorStop(1,'transparent');
+  ctx.fillStyle=sh; ctx.fillRect(lx,ly,n.w,n.h);
+  ctx.restore();
+
+  // Border
+  roundRect(lx,ly,n.w,n.h,r);
+  ctx.strokeStyle=rgba(n.color, 0.52); ctx.lineWidth=1; ctx.stroke();
+
+  // Accent line
+  roundRect(lx+1, ly+1, n.w-2, ss(2.5), [r,r,0,0]);
+  ctx.fillStyle=rgba(n.color, 0.55); ctx.fill();
+
+  // Text
+  ctx.fillStyle=C.text;
+  ctx.font=`600 ${ss(12)}px Inter,"Segoe UI",sans-serif`;
+  ctx.textAlign='center'; ctx.textBaseline='middle';
+  ctx.fillText(n.title, n.x, n.y - (n.sub ? ss(8) : 0));
+  if (n.sub) {
+    ctx.fillStyle=C.sub;
+    ctx.font=`${ss(9.5)}px Inter,"Segoe UI",sans-serif`;
+    ctx.fillText(n.sub, n.x, n.y+ss(10));
+  }
+
+  // Pulse ring
+  const pls = pulses[id];
+  if (pls && pls.v > 0) {
+    roundRect(lx-ss(4), ly-ss(4), n.w+ss(8), n.h+ss(8), r+ss(4));
+    ctx.strokeStyle=rgba(pls.c, pls.v*.55); ctx.lineWidth=ss(2); ctx.stroke();
+    pls.v = Math.max(0, pls.v-0.020);
+  }
+}
+
+// ── Particles ────────────────────────────────────────────────
+function spawnParticle(edgeIndex, opts={}) {
+  const e = edges[edgeIndex]; if (!e) return;
+  particles.push({
+    pts: e.pts(), t:0,
+    speed: opts.speed || (0.0038 + Math.random()*.0016),
+    size: opts.size || ss(3.8),
+    color: opts.color || e.color,
+    toId: e.to, trail:[],
+  });
+}
+
+function regularTraffic() {
+  const F = 42, SP = 0.0060, SZ = ss(3.5);
+  if (frame%F===0)  spawnParticle(0,  {color:C.cyan,    size:SZ, speed:SP}); // wifi → live
+  if (frame%F===6)  spawnParticle(2,  {color:C.teal,    size:SZ, speed:SP}); // live → spark
+  if (frame%F===12) spawnParticle(4,  {color:C.orange,  size:SZ, speed:SP}); // spark → kafka
+  if (frame%F===18) spawnParticle(5,  {color:C.orange,  size:SZ, speed:SP}); // kafka → consumer
+  if (frame%F===24) spawnParticle(6,  {color:C.amber,   size:SZ, speed:SP}); // consumer → csvLive
+  if (frame%F===30) spawnParticle(8,  {color:C.purple,  size:SZ, speed:SP}); // csvLive → dash
+  if (frame%F===36) spawnParticle(10, {color:C.purple2, size:SZ, speed:SP}); // dash → claude
+}
+
+function updateParticles() {
+  for (let i=particles.length-1;i>=0;i--) {
+    const p=particles[i];
+    p.t = Math.min(1, p.t+p.speed);
+    const pos = polyAt(p.pts, p.t);
+    p.trail.push({x:pos.x,y:pos.y});
+    if (p.trail.length>12) p.trail.shift();
+
+    p.trail.forEach((tp,ti) => {
+      const a=ti/p.trail.length;
+      ctx.beginPath(); ctx.arc(tp.x,tp.y, p.size*.6*a, 0, Math.PI*2);
+      ctx.fillStyle=rgba(p.color, .28*a); ctx.fill();
+    });
+
+    const gw=ctx.createRadialGradient(pos.x,pos.y,0, pos.x,pos.y, p.size*4);
+    gw.addColorStop(0, rgba(p.color,.68)); gw.addColorStop(1,'transparent');
+    ctx.fillStyle=gw;
+    ctx.beginPath(); ctx.arc(pos.x,pos.y, p.size*4, 0, Math.PI*2); ctx.fill();
+
+    ctx.beginPath(); ctx.arc(pos.x,pos.y, p.size, 0, Math.PI*2);
+    ctx.fillStyle=rgba(p.color,.92); ctx.fill();
+
+    ctx.beginPath(); ctx.arc(pos.x,pos.y, p.size*.38, 0, Math.PI*2);
+    ctx.fillStyle='rgba(255,255,255,.92)'; ctx.fill();
+
+    if (p.t>=1) {
+      pulses[p.toId]={v:1, c:p.color};
+      particles.splice(i,1);
+    }
+  }
+}
+
+// ── Attack particle ──────────────────────────────────────────
+function atkPts() {
+  return [
+    anchor('replay','right'), pt(270,550), pt(270,470),
+    anchor('spark','left'),   anchor('spark','right'),
+    anchor('kafka','left'),   anchor('kafka','right'),
+    anchor('consumer','left'),anchor('consumer','right'),
+    pt(1125,430), pt(1125,560),
+    anchor('csvAtk','left'),  anchor('csvAtk','right'),
+    pt(1410,560), pt(1410,470),
+    anchor('dash','left'),    anchor('dash','right'),
+    anchor('claude','left'),
+  ];
+}
+const ATK_NODES = ['spark','kafka','consumer','csvAtk','dash','claude'];
+
+function updateAttack() {
+  if (!atk && frame-lastAtk > 180) {
+    atk = {pts:atkPts(), t:0, speed:.0022, size:ss(6), triggered:new Set()};
+  }
+  if (!atk) return;
+
+  atk.t = Math.min(1, atk.t+atk.speed);
+  const pts=atk.pts, pos=polyAt(pts, atk.t);
+
+  ctx.save();
+  ctx.strokeStyle=rgba(C.red,.09); ctx.lineWidth=ss(3);
+  ctx.beginPath(); ctx.moveTo(pts[0].x,pts[0].y);
+  pts.slice(1).forEach(p=>ctx.lineTo(p.x,p.y)); ctx.stroke();
+  ctx.restore();
+
+  ATK_NODES.forEach(id=>{
+    const n=nodes[id]; if(!n) return;
+    if (Math.hypot(n.x-pos.x,n.y-pos.y)<ss(42) && !atk.triggered.has(id)) {
+      pulses[id]={v:1,c:C.red}; atk.triggered.add(id);
+    }
+  });
+
+  const gw=ctx.createRadialGradient(pos.x,pos.y,0, pos.x,pos.y, atk.size*7);
+  gw.addColorStop(0, rgba(C.red,.92));
+  gw.addColorStop(.4, rgba(C.orange,.42));
+  gw.addColorStop(1,'transparent');
+  ctx.fillStyle=gw;
+  ctx.beginPath(); ctx.arc(pos.x,pos.y, atk.size*7, 0, Math.PI*2); ctx.fill();
+
+  ctx.beginPath(); ctx.arc(pos.x,pos.y, atk.size*.55, 0, Math.PI*2);
+  ctx.fillStyle='#fff0f3'; ctx.fill();
+
+  ctx.fillStyle=rgba(C.red,.90);
+  ctx.font=`700 ${ss(9.5)}px "Courier New",monospace`;
+  ctx.textAlign='center'; ctx.textBaseline='bottom';
+  ctx.fillText('ATTACK', pos.x, pos.y-ss(14));
+
+  if (atk.t>=1) { atk=null; lastAtk=frame; }
+}
+
+// ── Legend ───────────────────────────────────────────────────
+function drawLegend() {
+  const items = [
+    ['WiFi + dataset producers', C.teal],
+    ['Spark ML inference',       C.green],
+    ['Kafka broker + consumer',  C.orange],
+    ['CSV epoch storage',        C.amber],
+    ['Dashboard + Claude AI',    C.purple],
+    ['Attack traversal ~5 s',    C.red],
+  ];
+  const gap=ss(215), startX=sx(490), y=sy(806);
+  items.forEach((item,i)=>{
+    const ix=startX+gap*i;
+    ctx.beginPath(); ctx.arc(ix,y,ss(4.5),0,Math.PI*2);
+    ctx.fillStyle=item[1]; ctx.fill();
+    ctx.fillStyle='rgba(238,244,255,.52)';
+    ctx.font=`${ss(9.5)}px Inter,"Segoe UI",sans-serif`;
+    ctx.textAlign='left'; ctx.textBaseline='middle';
+    ctx.fillText(item[0], ix+ss(11), y);
+  });
+}
+
+// ── Vignette ─────────────────────────────────────────────────
+function drawVignette() {
+  const vg=ctx.createRadialGradient(W/2,H/2,H*.18, W/2,H/2,H*.88);
+  vg.addColorStop(0,'transparent'); vg.addColorStop(1,'rgba(0,0,0,.50)');
+  ctx.fillStyle=vg; ctx.fillRect(0,0,W,H);
+}
+
+// ── Main loop ────────────────────────────────────────────────
+function loop() {
+  ctx.clearRect(0,0,W,H);
+  drawVignette();
+  drawSwimlanes();
+  drawEdges();
+  regularTraffic();
+  updateParticles();
+  updateAttack();
+  Object.keys(nodes).forEach(drawNode);
+  drawLegend();
+  frame++;
+  requestAnimationFrame(loop);
+}
+
+// ── Record ───────────────────────────────────────────────────
+const RECORD_DURATION = 15000;
+let mediaRecorder = null;
+
+function toggleRecord() {
+  if (mediaRecorder) return;
+  const btn = document.getElementById('rec-btn');
+  const chunks = [];
+  const stream = cv.captureStream(60);
+  mediaRecorder = new MediaRecorder(stream, { mimeType: 'video/webm; codecs=vp9' });
+
+  mediaRecorder.ondataavailable = e => { if (e.data.size > 0) chunks.push(e.data); };
+  mediaRecorder.onstop = () => {
+    const blob = new Blob(chunks, { type: 'video/webm' });
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(blob);
+    a.download = 'netsentinel-pipeline.webm';
+    a.click();
+    btn.textContent = '⏺ ENREGISTRER 15s';
+    btn.classList.remove('recording');
+    mediaRecorder = null;
+  };
+
+  mediaRecorder.start();
+  btn.textContent = '⏹ ENREGISTREMENT…';
+  btn.classList.add('recording');
+  setTimeout(() => mediaRecorder && mediaRecorder.stop(), RECORD_DURATION);
+}
+
+window.addEventListener('resize', resize);
+resize();
+requestAnimationFrame(loop);
+</script>
+</body>
+</html>

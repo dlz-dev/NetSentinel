@@ -15,6 +15,7 @@ import yaml
 import dash
 from dash import Input, Output, State, callback, dcc, html
 from dash.exceptions import PreventUpdate
+from src.netsentinel.agent.threat_analyzer import analyze_threat
 
 # ── Credentials ───────────────────────────────────────────────────────────
 with open("conf/local/credentials.yml") as f:
@@ -1183,7 +1184,6 @@ def run_ai_analysis(attack_type, ds):
     if not attack_type:
         raise PreventUpdate
     try:
-        from src.netsentinel.agent.threat_analyzer import analyze_threat
         result = analyze_threat(
             attack_type=attack_type,
             f1=_F1 * 100,

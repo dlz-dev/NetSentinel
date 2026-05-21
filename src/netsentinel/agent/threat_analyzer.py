@@ -2,11 +2,51 @@ import os
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import HumanMessage
 
+_LANGSMITH_OK: bool | None = None  # None = not tested yet
+
+
+LANGSMITH_ENDPOINT = "https://eu.api.smith.langchain.com"
+
+
+def _check_langsmith_key(api_key: str) -> bool:
+    """Return True if the key can authenticate against LangSmith EU."""
+    try:
+        import requests as _req
+        r = _req.get(
+            f"{LANGSMITH_ENDPOINT}/sessions",
+            headers={"x-api-key": api_key},
+            timeout=5,
+        )
+        return r.status_code == 200
+    except Exception:
+        return False
+
 
 def setup_langsmith(api_key: str) -> None:
+    global _LANGSMITH_OK
+    if _LANGSMITH_OK is None:
+        _LANGSMITH_OK = _check_langsmith_key(api_key)
+        if _LANGSMITH_OK:
+            print("[LangSmith] ✓ Clé valide — tracing activé (projet : netsentinel, EU)")
+        else:
+            print(
+                "[LangSmith] ✗ Clé invalide — tracing désactivé.\n"
+                "  → Vérifiez la clé sur https://eu.smith.langchain.com/settings#api-keys"
+            )
+    if not _LANGSMITH_OK:
+        for var in ("LANGCHAIN_TRACING_V2", "LANGSMITH_TRACING",
+                    "LANGCHAIN_API_KEY", "LANGSMITH_API_KEY",
+                    "LANGCHAIN_ENDPOINT", "LANGSMITH_ENDPOINT"):
+            os.environ.pop(var, None)
+        return
     os.environ["LANGCHAIN_TRACING_V2"] = "true"
+    os.environ["LANGSMITH_TRACING"]    = "true"
     os.environ["LANGCHAIN_API_KEY"]    = api_key
+    os.environ["LANGSMITH_API_KEY"]    = api_key
+    os.environ["LANGCHAIN_ENDPOINT"]   = LANGSMITH_ENDPOINT
+    os.environ["LANGSMITH_ENDPOINT"]   = LANGSMITH_ENDPOINT
     os.environ["LANGCHAIN_PROJECT"]    = "netsentinel"
+    os.environ["LANGSMITH_PROJECT"]    = "netsentinel"
 
 
 def analyze_threat(
