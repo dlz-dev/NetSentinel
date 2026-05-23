@@ -422,7 +422,7 @@ def _read_new_epochs(last_live: int, last_replay: int):
 app = dash.Dash(
     __name__,
     suppress_callback_exceptions=True,
-    assets_folder="assets_live",
+    assets_folder="assets/live",
 )
 server = app.server
 
